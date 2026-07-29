@@ -288,12 +288,14 @@ async function importSubdivision() {
     const divName = str(row[2]);
     if (!divName) { r.read++; skip(r, "missing Div Name"); continue; }
     r.read++;
-    trackField(r, "subdivisionName", null); // no source data exists for this header at all — always empty
-    ops.push({ filter: { division: divName.toUpperCase() }, doc: { division: divName, subdivisionName: null } });
+    // No distinct "sub-division name" concept exists in the source data — per explicit
+    // instruction, subdivisionName mirrors division exactly rather than staying empty.
+    trackField(r, "subdivisionName", divName);
+    ops.push({ filter: { division: divName.toUpperCase() }, doc: { division: divName, subdivisionName: divName } });
   }
   for (const divName of MANUAL_DIVISIONS) {
     r.read++;
-    ops.push({ filter: { division: divName.toUpperCase() }, doc: { division: divName, subdivisionName: null } });
+    ops.push({ filter: { division: divName.toUpperCase() }, doc: { division: divName, subdivisionName: divName } });
   }
   await bulkUpsert(SubdivisionModel, ops, r);
 }
@@ -744,12 +746,23 @@ async function computeDerivedCounts() {
   }
 
   // Subdivision.productwiseCount = catalog products whose brand's division matches;
-  // Subdivision.fieldforcewiseCount = employees whose division matches.
+  // Subdivision.fieldforcewiseCount = employees whose division matches. Both match
+  // case-insensitively, same as the live /company/employees and /company/product-catalog
+  // ?division= routes, so the counts shown here always agree with what those screens
+  // return when you select the same division.
   const subdivisions = await SubdivisionModel.find({ tenantSlug: TENANT });
   const catalogProducts = await ProductCatalogModel.find({ tenantSlug: TENANT }, { brandName: 1 });
   for (const sub of subdivisions) {
-    const productwiseCount = catalogProducts.filter((p) => p.brandName && brandDivision.get(p.brandName.toUpperCase()) === sub.division).length;
-    const fieldforcewiseCount = await EmployeeModel.countDocuments({ tenantSlug: TENANT, division: sub.division });
+    const subDivisionUpper = sub.division.toUpperCase();
+    const productwiseCount = catalogProducts.filter((p) => {
+      if (!p.brandName) return false;
+      const division = brandDivision.get(p.brandName.toUpperCase());
+      return division != null && division.toUpperCase() === subDivisionUpper;
+    }).length;
+    const fieldforcewiseCount = await EmployeeModel.countDocuments({
+      tenantSlug: TENANT,
+      division: { $regex: `^${escapeRegex(sub.division)}$`, $options: "i" }
+    });
     await SubdivisionModel.updateOne({ _id: sub._id }, { $set: { productwiseCount, fieldforcewiseCount } });
   }
 }
