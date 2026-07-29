@@ -97,6 +97,20 @@ function upperStr(v: unknown): string | null {
   return s ? s.toUpperCase() : null;
 }
 
+function escapeRegex(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Case-insensitive exact-match filter value. Upsert filters must match a field
+// regardless of how it's already cased in an existing document (Excel casing can
+// differ between sheets/runs) — matching on value.toUpperCase() while the stored
+// $set keeps the original casing means re-running never finds the existing document,
+// so MongoDB attempts an insert and collides with the unique index instead. This
+// finds the existing document by any casing; $set then normalizes it going forward.
+function ci(value: string): RegExp {
+  return new RegExp(`^${escapeRegex(value)}$`, "i");
+}
+
 function num(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
@@ -167,7 +181,7 @@ async function importCountry() {
     r.read++;
     const countryName = str(row[1]);
     if (!countryName) { skip(r, "missing CountryName"); continue; }
-    ops.push({ filter: { countryName: countryName.toUpperCase() }, doc: { countryName } });
+    ops.push({ filter: { countryName: ci(countryName) }, doc: { countryName } });
   }
   await bulkUpsert(CountryModel, ops, r);
 }
@@ -181,7 +195,7 @@ async function importState() {
     r.read++;
     const stateName = str(row[1]);
     if (!stateName) { skip(r, "missing StateName"); continue; }
-    ops.push({ filter: { stateName: stateName.toUpperCase() }, doc: { stateName, countryName: str(row[2]) } });
+    ops.push({ filter: { stateName: ci(stateName) }, doc: { stateName, countryName: str(row[2]) } });
   }
   await bulkUpsert(StateModel, ops, r);
 }
@@ -194,7 +208,7 @@ async function importCity() {
     const cityName = str(row[1]);
     if (!cityName) continue;
     r.read++;
-    ops.push({ filter: { cityName: cityName.toUpperCase() }, doc: { cityName, stateName: str(row[2]) } });
+    ops.push({ filter: { cityName: ci(cityName) }, doc: { cityName, stateName: str(row[2]) } });
   }
   await bulkUpsert(CityModel, ops, r);
 }
@@ -209,7 +223,7 @@ async function importLocation() {
     r.read++;
     const cityName = str(row[2]);
     ops.push({
-      filter: { locationName: locationName.toUpperCase(), cityName: cityName ? cityName.toUpperCase() : null },
+      filter: { locationName: ci(locationName), cityName: cityName ? ci(cityName) : null },
       doc: { locationName, cityName, pincode: row[3] !== null ? String(row[3]) : null }
     });
   }
@@ -224,7 +238,7 @@ async function importHeadQuarter() {
     const headQuarterName = str(row[1]);
     if (!headQuarterName) continue;
     r.read++;
-    ops.push({ filter: { headQuarterName: headQuarterName.toUpperCase() }, doc: { headQuarterName, stateName: str(row[2]), metroType: str(row[3]) } });
+    ops.push({ filter: { headQuarterName: ci(headQuarterName) }, doc: { headQuarterName, stateName: str(row[2]), metroType: str(row[3]) } });
   }
   await bulkUpsert(HeadQuarterModel, ops, r);
 }
@@ -237,7 +251,7 @@ async function importRole() {
     const roleName = str(row[1]);
     if (!roleName) continue;
     r.read++;
-    ops.push({ filter: { roleName: roleName.toUpperCase() }, doc: { roleName, fullForm: str(row[2]) } });
+    ops.push({ filter: { roleName: ci(roleName) }, doc: { roleName, fullForm: str(row[2]) } });
   }
   await bulkUpsert(RoleReferenceModel, ops, r);
 }
@@ -250,7 +264,7 @@ async function importLeave() {
     const desc = str(row[1]);
     if (!desc) continue;
     r.read++;
-    ops.push({ filter: { leaveTypeDesc: desc.toUpperCase() }, doc: { leaveTypeDesc: desc } });
+    ops.push({ filter: { leaveTypeDesc: ci(desc) }, doc: { leaveTypeDesc: desc } });
   }
   await bulkUpsert(LeaveTypeModel, ops, r);
 }
@@ -265,7 +279,7 @@ async function importCompetitorMap() {
     r.read++;
     const ourBrandName = str(row[3]);
     ops.push({
-      filter: { competitorBrandName: competitorBrandName.toUpperCase(), ourBrandName: ourBrandName ? ourBrandName.toUpperCase() : null },
+      filter: { competitorBrandName: ci(competitorBrandName), ourBrandName: ourBrandName ? ci(ourBrandName) : null },
       doc: { competitorBrandName, competitorCompanyName: str(row[2]), ourBrandName }
     });
   }
@@ -291,11 +305,11 @@ async function importSubdivision() {
     // No distinct "sub-division name" concept exists in the source data — per explicit
     // instruction, subdivisionName mirrors division exactly rather than staying empty.
     trackField(r, "subdivisionName", divName);
-    ops.push({ filter: { division: divName.toUpperCase() }, doc: { division: divName, subdivisionName: divName } });
+    ops.push({ filter: { division: ci(divName) }, doc: { division: divName, subdivisionName: divName } });
   }
   for (const divName of MANUAL_DIVISIONS) {
     r.read++;
-    ops.push({ filter: { division: divName.toUpperCase() }, doc: { division: divName, subdivisionName: divName } });
+    ops.push({ filter: { division: ci(divName) }, doc: { division: divName, subdivisionName: divName } });
   }
   await bulkUpsert(SubdivisionModel, ops, r);
 }
@@ -310,7 +324,7 @@ async function importProductCategory() {
     const therapyName = str(row[1]);
     if (!therapyName) continue;
     r.read++;
-    ops.push({ filter: { categoryName: therapyName.toUpperCase() }, doc: { categoryName: therapyName } });
+    ops.push({ filter: { categoryName: ci(therapyName) }, doc: { categoryName: therapyName } });
   }
   await bulkUpsert(ProductCategoryModel, ops, r);
 }
@@ -323,7 +337,7 @@ async function importProductGroup() {
     const moleculeName = str(row[1]);
     if (!moleculeName) { r.read++; skip(r, "missing MoleculeName"); continue; }
     r.read++;
-    ops.push({ filter: { moleculeName: moleculeName.toUpperCase() }, doc: { moleculeName, therapyName: str(row[2]) } });
+    ops.push({ filter: { moleculeName: ci(moleculeName) }, doc: { moleculeName, therapyName: str(row[2]) } });
   }
   await bulkUpsert(ProductGroupModel, ops, r);
 }
@@ -336,7 +350,7 @@ async function importProductBrand() {
     const brandName = str(row[1]);
     if (!brandName) { r.read++; skip(r, "missing BrandName"); continue; }
     r.read++;
-    ops.push({ filter: { brandName: brandName.toUpperCase() }, doc: { brandName, division: str(row[2]), moleculeName: str(row[3]) } });
+    ops.push({ filter: { brandName: ci(brandName) }, doc: { brandName, division: str(row[2]), moleculeName: str(row[3]) } });
   }
   await bulkUpsert(ProductBrandModel, ops, r);
 }
@@ -350,7 +364,7 @@ async function importProductCatalog() {
     if (!productName) { r.read++; skip(r, "missing ProductName"); continue; }
     r.read++;
     ops.push({
-      filter: { productName: productName.toUpperCase() },
+      filter: { productName: ci(productName) },
       doc: { productName, brandName: str(row[2]), molecule: str(row[3]), therapy: str(row[4]) }
     });
   }
@@ -557,7 +571,7 @@ async function importDoctorLookups() {
     { $group: { _id: "$categoryCode", count: { $sum: 1 } } }
   ]);
   rCat.read = catAgg.length;
-  const catOps = catAgg.map((g) => ({ filter: { categoryName: String(g._id).toUpperCase() }, doc: { categoryName: g._id, noOfDoctors: g.count } }));
+  const catOps = catAgg.map((g) => ({ filter: { categoryName: ci(String(g._id)) }, doc: { categoryName: g._id, noOfDoctors: g.count } }));
   await bulkUpsert(DoctorCategoryModel, catOps, rCat);
 
   const rSpec = newReport("Customer (derived: narrow Speciality)", "doctorSpecialities");
@@ -566,7 +580,7 @@ async function importDoctorLookups() {
     { $group: { _id: "$specialityCode", count: { $sum: 1 } } }
   ]);
   rSpec.read = specAgg.length;
-  const specOps = specAgg.map((g) => ({ filter: { specialityName: String(g._id).toUpperCase() }, doc: { specialityName: g._id, noOfDoctors: g.count } }));
+  const specOps = specAgg.map((g) => ({ filter: { specialityName: ci(String(g._id)) }, doc: { specialityName: g._id, noOfDoctors: g.count } }));
   await bulkUpsert(DoctorSpecialityModel, specOps, rSpec);
 
   const rQual = newReport("Customer (derived: Qualification)", "doctorQualifications");
@@ -575,7 +589,7 @@ async function importDoctorLookups() {
     { $group: { _id: "$qualification", count: { $sum: 1 } } }
   ]);
   rQual.read = qualAgg.length;
-  const qualOps = qualAgg.map((g) => ({ filter: { qualificationName: String(g._id).toUpperCase() }, doc: { qualificationName: g._id, noOfDoctors: g.count } }));
+  const qualOps = qualAgg.map((g) => ({ filter: { qualificationName: ci(String(g._id)) }, doc: { qualificationName: g._id, noOfDoctors: g.count } }));
   await bulkUpsert(DoctorQualificationModel, qualOps, rQual);
 }
 
@@ -710,7 +724,7 @@ async function importExpenses() {
     trackField(r, "frequency", frequency);
 
     ops.push({
-      filter: { role: roleS.toUpperCase(), listOfExpenseTypes: (listS ?? "").toUpperCase(), station: upperStr(station), metroType: upperStr(metroType) },
+      filter: { role: ci(roleS), listOfExpenseTypes: listS ? ci(listS) : null, station: station ? ci(String(station)) : null, metroType: metroType ? ci(String(metroType)) : null },
       doc: {
         role: roleS,
         listOfExpenseTypes: listS,
@@ -765,10 +779,6 @@ async function computeDerivedCounts() {
     });
     await SubdivisionModel.updateOne({ _id: sub._id }, { $set: { productwiseCount, fieldforcewiseCount } });
   }
-}
-
-function escapeRegex(s: string) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
