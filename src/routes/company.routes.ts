@@ -19,6 +19,11 @@ import { ProductCatalogModel } from "../models/product-catalog.model.js";
 import { DoctorCategoryModel } from "../models/doctor-category.model.js";
 import { DoctorSpecialityModel } from "../models/doctor-speciality.model.js";
 import { DoctorQualificationModel } from "../models/doctor-qualification.model.js";
+import { ProductGroupModel } from "../models/product-group.model.js";
+import { DealerModel } from "../models/dealer.model.js";
+import { HolidayModel } from "../models/holiday.model.js";
+import { SfcModel } from "../models/sfc.model.js";
+import { ExpenseModel } from "../models/expense.model.js";
 
 
 const employeeSchema = z.object({
@@ -86,7 +91,11 @@ companyRouter.get(
 companyRouter.get(
   "/employees",
   asyncHandler(async (req, res) => {
-    const employees = await EmployeeModel.find({ tenantSlug: req.auth!.tenantSlug }).sort({ createdAt: -1 });
+    const query: Record<string, unknown> = { tenantSlug: req.auth!.tenantSlug };
+    if (typeof req.query.division === "string" && req.query.division.trim()) {
+      query.division = req.query.division.trim();
+    }
+    const employees = await EmployeeModel.find(query).sort({ createdAt: -1 });
     res.json({ data: employees.map(serializeDocument) });
   })
 );
@@ -542,7 +551,14 @@ const productCatalogSchema = z.object({
 const productCatalogUpdateSchema = productCatalogSchema.partial();
 
 companyRouter.get("/product-catalog", asyncHandler(async (req, res) => {
-  const products = await ProductCatalogModel.find({ tenantSlug: req.auth!.tenantSlug }).sort({ sortOrder: 1, createdAt: 1 });
+  const tenantSlug = req.auth!.tenantSlug!;
+  const query: Record<string, unknown> = { tenantSlug };
+  if (typeof req.query.division === "string" && req.query.division.trim()) {
+    // ProductCatalogModel has no division field of its own — it's derived via the brand's division.
+    const brands = await ProductBrandModel.find({ tenantSlug, division: req.query.division.trim() }, { brandName: 1 });
+    query.brandName = { $in: brands.map((b) => b.brandName) };
+  }
+  const products = await ProductCatalogModel.find(query).sort({ sortOrder: 1, createdAt: 1 });
   res.json({ data: products.map(serializeDocument) });
 }));
 
@@ -719,4 +735,41 @@ companyRouter.post("/doctor-qualifications/:id/reactivate", asyncHandler(async (
   if (!row) throw new HttpError(404, "Doctor Qualification not found");
   await audit("DOCTOR_QUALIFICATION_REACTIVATED", "DoctorQualification", String(row._id), { tenantSlug });
   res.json({ data: serializeDocument(row) });
+}));
+
+// ─── Product Groups (read-only, imported from Excel) ────────────────────────
+
+companyRouter.get("/product-groups", asyncHandler(async (req, res) => {
+  const rows = await ProductGroupModel.find({ tenantSlug: req.auth!.tenantSlug }).sort({ moleculeName: 1 });
+  res.json({ data: rows.map(serializeDocument) });
+}));
+
+// ─── Chemist / Dealers (read-only, imported from Excel) ─────────────────────
+
+companyRouter.get("/dealers", asyncHandler(async (req, res) => {
+  const rows = await DealerModel.find({ tenantSlug: req.auth!.tenantSlug }).sort({ sourceSNo: 1 });
+  res.json({ data: rows.map(serializeDocument) });
+}));
+
+// ─── Holidays (read-only, imported from Excel) ───────────────────────────────
+
+companyRouter.get("/holidays", asyncHandler(async (req, res) => {
+  const rows = await HolidayModel.find({ tenantSlug: req.auth!.tenantSlug }).sort({ sourceSNo: 1 });
+  res.json({ data: rows.map(serializeDocument) });
+}));
+
+// ─── SFC (read-only, imported from Excel) ────────────────────────────────────
+
+companyRouter.get("/sfc", asyncHandler(async (req, res) => {
+  const rows = await SfcModel.find({ tenantSlug: req.auth!.tenantSlug }).sort({ sourceSNo: 1 });
+  res.json({ data: rows.map(serializeDocument) });
+}));
+
+// ─── Expense (read-only, imported from Excel) — backs SFC Updation, Allowance
+// Fixation, and Fixed/Variable Expense Parameter, each rendering a different
+// subset of the same records ───────────────────────────────────────────────
+
+companyRouter.get("/expenses", asyncHandler(async (req, res) => {
+  const rows = await ExpenseModel.find({ tenantSlug: req.auth!.tenantSlug }).sort({ role: 1 });
+  res.json({ data: rows.map(serializeDocument) });
 }));
