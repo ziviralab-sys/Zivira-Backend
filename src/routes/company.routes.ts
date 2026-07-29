@@ -25,6 +25,12 @@ import { HolidayModel } from "../models/holiday.model.js";
 import { SfcModel } from "../models/sfc.model.js";
 import { ExpenseModel } from "../models/expense.model.js";
 
+// Case-insensitive exact match, so "division" filters agree regardless of how a value
+// was originally cased (Excel import vs. manual entry through the Add form).
+function exactCaseInsensitive(value: string) {
+  return new RegExp(`^${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+}
+
 
 const employeeSchema = z.object({
   name: z.string().min(2),
@@ -93,7 +99,7 @@ companyRouter.get(
   asyncHandler(async (req, res) => {
     const query: Record<string, unknown> = { tenantSlug: req.auth!.tenantSlug };
     if (typeof req.query.division === "string" && req.query.division.trim()) {
-      query.division = req.query.division.trim();
+      query.division = exactCaseInsensitive(req.query.division.trim());
     }
     const employees = await EmployeeModel.find(query).sort({ createdAt: -1 });
     res.json({ data: employees.map(serializeDocument) });
@@ -555,7 +561,7 @@ companyRouter.get("/product-catalog", asyncHandler(async (req, res) => {
   const query: Record<string, unknown> = { tenantSlug };
   if (typeof req.query.division === "string" && req.query.division.trim()) {
     // ProductCatalogModel has no division field of its own — it's derived via the brand's division.
-    const brands = await ProductBrandModel.find({ tenantSlug, division: req.query.division.trim() }, { brandName: 1 });
+    const brands = await ProductBrandModel.find({ tenantSlug, division: exactCaseInsensitive(req.query.division.trim()) }, { brandName: 1 });
     query.brandName = { $in: brands.map((b) => b.brandName) };
   }
   const products = await ProductCatalogModel.find(query).sort({ sortOrder: 1, createdAt: 1 });
