@@ -31,6 +31,15 @@ function exactCaseInsensitive(value: string) {
   return new RegExp(`^${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
 }
 
+// Shared page/limit parsing for routes that back large collections (e.g. the ~20k-row
+// doctor/customer import) so the client never has to pull the whole collection at once.
+function parsePagination(req: { query: Record<string, unknown> }, opts: { defaultLimit: number; maxLimit: number }) {
+  const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const rawLimit = parseInt(String(req.query.limit ?? opts.defaultLimit), 10) || opts.defaultLimit;
+  const limit = Math.min(Math.max(1, rawLimit), opts.maxLimit);
+  return { page, limit, skip: (page - 1) * limit };
+}
+
 
 const employeeSchema = z.object({
   name: z.string().min(2),
@@ -120,8 +129,38 @@ companyRouter.post(
 companyRouter.get(
   "/doctors",
   asyncHandler(async (req, res) => {
-    const doctors = await DoctorModel.find({ tenantSlug: req.auth!.tenantSlug }).sort({ createdAt: -1 });
-    res.json({ data: doctors.map(serializeDocument) });
+    const tenantSlug = req.auth!.tenantSlug;
+    const { page, limit, skip } = parsePagination(req, { defaultLimit: 100, maxLimit: 500 });
+    const [doctors, total] = await Promise.all([
+      DoctorModel.find({ tenantSlug }).sort({ createdAt: -1, doctorCode: 1 }).skip(skip).limit(limit),
+      DoctorModel.countDocuments({ tenantSlug })
+    ]);
+    res.json({
+      data: doctors.map(serializeDocument),
+      pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) }
+    });
+  })
+);
+
+// Distinct, paginated clinic names sourced from the doctor collection (Excel Customer
+// sheet's "Clinic name" column) — backs the Hospital screen without fetching all ~20k
+// doctor documents just to dedupe one field.
+companyRouter.get(
+  "/doctors/clinics",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug;
+    const { page, limit, skip } = parsePagination(req, { defaultLimit: 100, maxLimit: 500 });
+    const values = await DoctorModel.distinct("clinicName", { tenantSlug });
+    const names = [...new Set(
+      values
+        .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+        .map((v) => v.trim())
+    )].sort((a, b) => a.localeCompare(b));
+    const total = names.length;
+    res.json({
+      data: names.slice(skip, skip + limit),
+      pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) }
+    });
   })
 );
 
