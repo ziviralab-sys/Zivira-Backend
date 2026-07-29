@@ -366,7 +366,7 @@ companyRouter.post(
 
 const subdivisionSchema = z.object({
   division: z.string().min(1),
-  subdivisionName: z.string().min(1),
+  subdivisionName: z.string().min(1).optional().nullable(),
   productwiseCount: z.number().int().min(0).default(0),
   fieldforcewiseCount: z.number().int().min(0).default(0)
 });
