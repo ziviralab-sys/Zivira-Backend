@@ -7,6 +7,7 @@ const productCatalogSchema = new Schema(
     productName: { type: String, required: true, trim: true },
     description: { type: String, trim: true },
     brandName: { type: String, trim: true },
+    molecule: { type: String, trim: true, default: null },
     therapy: { type: String, trim: true },
     saleUnit: { type: String, trim: true, default: null },
     noOfSlides: { type: Number, default: null },

@@ -11,10 +11,23 @@ const employeeSchema = new Schema(
     territory: { type: String, required: true, trim: true },
     role: {
       type: String,
-      enum: ["NBH", "BH", "RBM", "ZBM", "ABM", "SR_MR", "MR"],
+      enum: ["NBH", "BH", "RBM", "ZBM", "ABM", "SR_MR", "MR", "OTHER"],
       required: true,
       index: true
     },
+    dob: { type: Date, default: null },
+    email: { type: String, trim: true, lowercase: true, default: null },
+    phone: { type: String, trim: true, default: null },
+    joinDate: { type: Date, default: null },
+    address1: { type: String, trim: true, default: null },
+    landmark: { type: String, trim: true, default: null },
+    location: { type: String, trim: true, default: null },
+    city: { type: String, trim: true, default: null },
+    state: { type: String, trim: true, default: null },
+    country: { type: String, trim: true, default: null },
+    postalCode: { type: String, trim: true, default: null },
+    l1Division: { type: String, trim: true, default: null },
+    l1Role: { type: String, trim: true, default: null },
     status: { type: String, enum: ["ACTIVE", "INACTIVE"], default: "ACTIVE", index: true }
   },
   { timestamps: true }

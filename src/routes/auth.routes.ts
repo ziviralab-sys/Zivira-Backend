@@ -8,7 +8,7 @@ import { UserModel } from "../models/user.model.js";
 
 const loginSchema = z.object({
   username: z.string().min(2).transform((value) => value.toLowerCase()),
-  password: z.string().min(6),
+  password: z.string().min(1),
   portal: z.enum(["SUPER_ADMIN", "COMPANY_ADMIN", "FIELD_FORCE"])
 });
 
