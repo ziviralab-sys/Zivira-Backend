@@ -140,7 +140,12 @@ async function bulkUpsert(
       batch.map((op) => ({
         updateOne: {
           filter: { tenantSlug: TENANT, ...op.filter },
-          update: { $set: { tenantSlug: TENANT, ...op.doc } },
+          // Raw bulkWrite upserts skip Mongoose schema defaults entirely, so `status`
+          // (and every model's default("ACTIVE")) would otherwise be left unset on
+          // every newly-inserted document. $setOnInsert applies it only when the
+          // document is first created, so re-running this script never clobbers a
+          // status someone changed via the deactivate/reactivate UI afterward.
+          update: { $set: { tenantSlug: TENANT, ...op.doc }, $setOnInsert: { status: "ACTIVE" } },
           upsert: true
         }
       })),
@@ -269,6 +274,12 @@ async function importCompetitorMap() {
 
 // ─── Sub-Division (Divsion sheet) ───────────────────────────────────────────
 
+// Divisions confirmed by the client that exist outside the Excel Data Template — not
+// sourced from any sheet, so they're kept separate from the Divsion-sheet rows below
+// rather than invented as fake Excel data. Stored identically to the real Excel-sourced
+// divisions (same shape, same upsert path) so they behave the same everywhere.
+const MANUAL_DIVISIONS = ["ZIVIRA EAST"];
+
 async function importSubdivision() {
   const r = newReport("Divsion", "subdivisions");
   const rows = sheetRows("Divsion").slice(1);
@@ -278,6 +289,10 @@ async function importSubdivision() {
     if (!divName) { r.read++; skip(r, "missing Div Name"); continue; }
     r.read++;
     trackField(r, "subdivisionName", null); // no source data exists for this header at all — always empty
+    ops.push({ filter: { division: divName.toUpperCase() }, doc: { division: divName, subdivisionName: null } });
+  }
+  for (const divName of MANUAL_DIVISIONS) {
+    r.read++;
     ops.push({ filter: { division: divName.toUpperCase() }, doc: { division: divName, subdivisionName: null } });
   }
   await bulkUpsert(SubdivisionModel, ops, r);
@@ -745,9 +760,39 @@ function escapeRegex(s: string) {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
+// One-time repair for documents written by the original version of this script, which
+// used a raw bulkWrite $set that (unlike Model.create()) never applies Mongoose's
+// status default("ACTIVE") — every previously-imported document is missing `status`
+// entirely. $setOnInsert in bulkUpsert() only protects future inserts; it doesn't touch
+// documents that already exist. Runs first so the fix takes effect even if the rest of
+// the import is interrupted.
+async function backfillMissingStatus() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const models: mongoose.Model<any>[] = [
+    SubdivisionModel, ProductCategoryModel, ProductGroupModel, ProductBrandModel, ProductCatalogModel,
+    EmployeeModel, DoctorModel, DoctorCategoryModel, DoctorSpecialityModel, DoctorQualificationModel,
+    DealerModel, HolidayModel, SfcModel, ExpenseModel,
+    CountryModel, StateModel, CityModel, LocationModel, HeadQuarterModel, RoleReferenceModel, LeaveTypeModel, CompetitorMapModel
+  ];
+  let totalFixed = 0;
+  for (const Model of models) {
+    const result = await Model.updateMany(
+      { tenantSlug: TENANT, status: { $exists: false } },
+      { $set: { status: "ACTIVE" } }
+    );
+    if (result.modifiedCount) {
+      console.log(`Backfilled status="ACTIVE" on ${result.modifiedCount} existing ${Model.modelName} document(s).`);
+      totalFixed += result.modifiedCount;
+    }
+  }
+  console.log(`Status backfill complete: ${totalFixed} document(s) fixed.\n`);
+}
+
 async function main() {
   await connectMongo();
   console.log(`Connected to MongoDB. Importing from ${EXCEL_PATH} into tenant "${TENANT}"...\n`);
+
+  await backfillMissingStatus();
 
   await importCountry();
   await importState();
