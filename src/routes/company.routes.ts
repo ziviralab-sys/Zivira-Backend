@@ -164,6 +164,30 @@ companyRouter.get(
   })
 );
 
+// Doctors whose dob or anniversaryDate falls in the given month (1-12), for the Doctor
+// Celebrations report. Filtered server-side so this doesn't require fetching the whole
+// ~20k-row doctor collection just to find one month's birthdays/anniversaries.
+companyRouter.get(
+  "/doctors/celebrations",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug;
+    const month = parseInt(String(req.query.month ?? ""), 10);
+    if (!Number.isInteger(month) || month < 1 || month > 12) {
+      throw new HttpError(400, "month query param (1-12) is required");
+    }
+    const doctors = await DoctorModel.find({
+      tenantSlug,
+      $expr: {
+        $or: [
+          { $eq: [{ $month: "$dob" }, month] },
+          { $eq: [{ $month: "$anniversaryDate" }, month] }
+        ]
+      }
+    }).sort({ name: 1 });
+    res.json({ data: doctors.map(serializeDocument) });
+  })
+);
+
 companyRouter.post(
   "/doctors",
   asyncHandler(async (req, res) => {
