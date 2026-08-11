@@ -26,7 +26,12 @@ const noticeSchema = new Schema(
       enum: ["NORMAL", "URGENT"],
       default: "NORMAL"
     },
-    postedBy: { type: String, trim: true } // user id of the admin who posted
+    postedBy: { type: String, trim: true }, // user id of the admin who posted
+    // Optional — set when a notice targets one specific manager/employee
+    // (e.g. Tour Plan voided-by-another-manager alert, Section 12.1) instead
+    // of the whole audience. Left blank for normal broadcast notices.
+    targetEmployeeCode: { type: String, trim: true, default: null },
+    readBy: { type: [String], default: [] }
   },
   { timestamps: true }
 );

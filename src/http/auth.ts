@@ -54,7 +54,13 @@ export function requireCompanyAdmin(req: Request, _res: Response, next: NextFunc
 }
 
 export function requireFieldForce(req: Request, _res: Response, next: NextFunction) {
-  if (req.auth?.role !== "MR" || req.auth.portal !== "FIELD_FORCE" || !req.auth.tenantSlug) {
+  // SR_MR (Senior Medical Representative) is a field-force role too — managers
+  // can already create SR_MR team members (see manager.routes.ts), so the
+  // gate here must accept both, or SR_MR logins are locked out of every
+  // field endpoint (DCR, Tour Plan, visit tracking) despite having valid
+  // FIELD_FORCE credentials.
+  const role = req.auth?.role;
+  if ((role !== "MR" && role !== "SR_MR") || req.auth?.portal !== "FIELD_FORCE" || !req.auth?.tenantSlug) {
     return next(new HttpError(403, "Field Force access required"));
   }
 

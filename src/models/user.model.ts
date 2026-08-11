@@ -7,7 +7,11 @@ const userSchema = new Schema(
     displayName: { type: String, required: true },
     role: {
       type: String,
-      enum: ["SUPER_ADMIN", "COMPANY_ADMIN", "NBH", "ABM", "MR"],
+      // Must stay in sync with EmployeeModel's role enum (NBH/BH/RBM/ZBM/ABM/
+      // SR_MR/MR) plus the two portal-owner roles. Missing roles here caused
+      // login-account creation to fail silently for RBM/SR_MR/BH/ZBM
+      // employees — PRD 8.1 requires ABM AND RBM to both work as managers.
+      enum: ["SUPER_ADMIN", "COMPANY_ADMIN", "NBH", "BH", "RBM", "ZBM", "ABM", "SR_MR", "MR"],
       required: true,
       index: true
     },

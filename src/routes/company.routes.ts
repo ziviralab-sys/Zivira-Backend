@@ -1,4 +1,5 @@
 import { Router } from "express";
+import mongoose from "mongoose";
 import { z } from "zod";
 import { asyncHandler } from "../http/async-handler.js";
 import { requireAuth, requireCompanyAdmin } from "../http/auth.js";
@@ -27,6 +28,9 @@ import { SfcModel } from "../models/sfc.model.js";
 import { ExpenseModel } from "../models/expense.model.js";
 import { HospitalModel } from "../models/hospital.model.js";
 import { UnlistedDoctorModel } from "../models/unlisted-doctor.model.js";
+import { CompanyBranchModel } from "../models/company-branch.model.js";
+import { TourPlanModel } from "../models/tour-plan.model.js";
+import { CompanyConfigModel, DEFAULT_CONFIG, getConfigValue } from "../models/company-config.model.js";
 
 // Case-insensitive exact match, so "division" filters agree regardless of how a value
 // was originally cased (Excel import vs. manual entry through the Add form).
@@ -973,13 +977,262 @@ companyRouter.post("/territory/bulk-deactivate", asyncHandler(async (req, res) =
   const tenantSlug = req.auth!.tenantSlug!;
   const patchSchema = z.object({ patch: z.string().min(1) });
   const { patch } = patchSchema.parse(req.body);
-  
+
   const result = await DoctorModel.updateMany(
     { tenantSlug, territory: patch },
     { $set: { status: "INACTIVE" } }
   );
-  
+
   await audit("TERRITORY_BULK_DEACTIVATED", "Territory", patch, { tenantSlug, modifiedCount: result.modifiedCount });
   res.json({ data: { success: true, modifiedCount: result.modifiedCount } });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// PRD Section 12.5 — GST Multi-Branch Location — Admin "Branches & GST" tab
+// ══════════════════════════════════════════════════════════════════════
+
+const companyBranchValidation = z.object({
+  branchName: z.string().min(2),
+  gstNumber: z.string().min(15, "GST number must be 15 characters").max(15),
+  address: z.string().min(2),
+  city: z.string().min(2),
+  state: z.string().min(2),
+  pincode: z.string().min(4),
+  isHeadquarters: z.boolean().optional().default(false),
+  status: z.enum(["ACTIVE", "INACTIVE"]).default("ACTIVE")
+});
+
+companyRouter.get("/branches", asyncHandler(async (req, res) => {
+  const branches = await CompanyBranchModel.find({ tenantSlug: req.auth!.tenantSlug }).sort({ isHeadquarters: -1, branchName: 1 });
+  res.json({ data: branches.map(serializeDocument) });
+}));
+
+companyRouter.post("/branches", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const body = companyBranchValidation.parse(req.body);
+  const gstNumber = body.gstNumber.toUpperCase().trim();
+
+  const dupe = await CompanyBranchModel.findOne({ tenantSlug, gstNumber });
+  if (dupe) throw new HttpError(409, `This GST number is already registered to ${dupe.branchName}`);
+
+  if (body.isHeadquarters) {
+    await CompanyBranchModel.updateMany({ tenantSlug }, { $set: { isHeadquarters: false } });
+  }
+
+  const branch = await CompanyBranchModel.create({ ...body, gstNumber, tenantSlug });
+  await audit("COMPANY_BRANCH_CREATED", "CompanyBranch", String(branch._id), { tenantSlug, branchName: branch.branchName });
+  res.status(201).json({ data: serializeDocument(branch) });
+}));
+
+companyRouter.patch("/branches/:id", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const body = companyBranchValidation.partial().parse(req.body);
+  const update: Record<string, unknown> = { ...body };
+  if (body.gstNumber) {
+    const gstNumber = body.gstNumber.toUpperCase().trim();
+    const dupe = await CompanyBranchModel.findOne({ tenantSlug, gstNumber, _id: { $ne: req.params.id } });
+    if (dupe) throw new HttpError(409, `This GST number is already registered to ${dupe.branchName}`);
+    update.gstNumber = gstNumber;
+  }
+  if (body.isHeadquarters) {
+    await CompanyBranchModel.updateMany({ tenantSlug, _id: { $ne: req.params.id } }, { $set: { isHeadquarters: false } });
+  }
+  const branch = await CompanyBranchModel.findOneAndUpdate({ _id: req.params.id, tenantSlug }, update, { new: true });
+  if (!branch) throw new HttpError(404, "Branch not found");
+  await audit("COMPANY_BRANCH_UPDATED", "CompanyBranch", String(branch._id), { tenantSlug });
+  res.json({ data: serializeDocument(branch) });
+}));
+
+// GET /company/branches/lookup?gst=29AAACZ3085J1ZP — returns the branch
+// matching that GST number, or 404 if it's not one of Zivira's own branches
+// (e.g. a distributor's GST appearing on their statement — PRD "Exact
+// Solution": skip auto-fill and leave branch as manual selection).
+companyRouter.get("/branches/lookup", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const gst = typeof req.query.gst === "string" ? req.query.gst.toUpperCase().trim() : "";
+  if (!gst) throw new HttpError(400, "gst query parameter is required");
+  const branch = await CompanyBranchModel.findOne({ tenantSlug, gstNumber: gst });
+  if (!branch) throw new HttpError(404, "No branch registered with this GST number");
+  res.json({ data: serializeDocument(branch) });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// PRD Section 12.1 — Tour Plan — Admin read-only view across all managers
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get("/tour-plans", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const query: Record<string, unknown> = { tenantSlug };
+  if (typeof req.query.month === "string" && req.query.month) query.month = req.query.month;
+  if (typeof req.query.status === "string" && req.query.status) query.status = req.query.status;
+  const tps = await TourPlanModel.find(query).sort({ createdAt: -1 }).limit(1000);
+  res.json({ data: tps.map(serializeDocument) });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// PRD Section 12.2 — Visit Summary (admin-wide, filterable by MR)
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get("/visit-summary", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const month = typeof req.query.month === "string" && req.query.month ? req.query.month : undefined;
+  const employeeCode = typeof req.query.employeeCode === "string" ? req.query.employeeCode : undefined;
+
+  const match: Record<string, unknown> = { tenantSlug, status: { $ne: "REJECTED" } };
+  if (month) match.month = month;
+  if (employeeCode) match.employeeCode = employeeCode;
+
+  const rows = await DcrModel.aggregate([
+    { $match: match },
+    { $group: { _id: "$doctorId", visitCount: { $sum: 1 }, lastVisitDate: { $max: "$visitDate" } } },
+    { $lookup: { from: "doctors", localField: "_id", foreignField: "_id", as: "doctor" } },
+    { $unwind: { path: "$doctor", preserveNullAndEmptyArrays: true } },
+    { $project: {
+      doctorId: "$_id", _id: 0,
+      doctorName: "$doctor.name",
+      mappedEmployeeCode: "$doctor.mappedEmployeeCode",
+      visitCount: 1, lastVisitDate: 1,
+      overVisitFlag: { $gte: ["$visitCount", 3] }
+    } },
+    { $sort: { doctorName: 1 } }
+  ]);
+  res.json({ data: rows, month: month ?? "all" });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// PRD Section 12.3A — Drug Summary (samples given, per product, per doctor)
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get("/drug-summary", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const month = typeof req.query.month === "string" && req.query.month ? req.query.month : undefined;
+  const doctorId = typeof req.query.doctorId === "string" ? req.query.doctorId : undefined;
+
+  const match: Record<string, unknown> = { tenantSlug, status: { $ne: "REJECTED" } };
+  if (month) match.month = month;
+  if (doctorId) match.doctorId = new mongoose.Types.ObjectId(doctorId);
+
+  const rows = await DcrModel.aggregate([
+    { $match: match },
+    { $unwind: { path: "$samplesGiven", preserveNullAndEmptyArrays: true } },
+    { $match: { samplesGiven: { $ne: null } } },
+    { $group: {
+      _id: { doctorId: "$doctorId", productCode: "$samplesGiven.productCode", productName: "$samplesGiven.productName" },
+      totalQty: { $sum: "$samplesGiven.qty" },
+      visitCount: { $sum: 1 }
+    } },
+    { $project: { _id: 0, doctorId: "$_id.doctorId", productCode: "$_id.productCode", productName: "$_id.productName", totalQty: 1, visitCount: 1 } },
+    { $sort: { totalQty: -1 } }
+  ]);
+  res.json({ data: rows, month: month ?? "all" });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// PRD Section 12.3B — Gift Summary (inputs given, per item type, per doctor)
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get("/gift-summary", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const month = typeof req.query.month === "string" && req.query.month ? req.query.month : undefined;
+  const doctorId = typeof req.query.doctorId === "string" ? req.query.doctorId : undefined;
+
+  const match: Record<string, unknown> = { tenantSlug, status: { $ne: "REJECTED" } };
+  if (month) match.month = month;
+  if (doctorId) match.doctorId = new mongoose.Types.ObjectId(doctorId);
+
+  const thresholdRaw = await getConfigValue(tenantSlug, "GIFT_VALUE_THRESHOLD_RS");
+  const threshold = typeof thresholdRaw === "number" ? thresholdRaw : Number(DEFAULT_CONFIG.GIFT_VALUE_THRESHOLD_RS);
+
+  const rows = await DcrModel.aggregate([
+    { $match: match },
+    { $unwind: { path: "$inputsGiven", preserveNullAndEmptyArrays: true } },
+    { $match: { inputsGiven: { $ne: null } } },
+    { $group: {
+      _id: { doctorId: "$doctorId", itemType: "$inputsGiven.itemType" },
+      totalQty: { $sum: "$inputsGiven.qty" },
+      totalValue: { $sum: { $ifNull: ["$inputsGiven.valueRs", 0] } }
+    } },
+    { $project: { _id: 0, doctorId: "$_id.doctorId", itemType: "$_id.itemType", totalQty: 1, totalValue: 1, overThreshold: { $gt: ["$totalValue", threshold] } } },
+    { $sort: { totalValue: -1 } }
+  ]);
+  res.json({ data: rows, month: month ?? "all", thresholdRs: threshold });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// PRD Section 12.3 — Admin MIS "Doctor Coverage" sub-tab: Doctor Name, Total
+// Visits, Total Samples (units), Total Gifts (units), Last Visit Date,
+// Assigned MR — everything in one row per doctor, ready for CSV export.
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get("/doctor-coverage", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const month = typeof req.query.month === "string" && req.query.month ? req.query.month : undefined;
+  const match: Record<string, unknown> = { tenantSlug, status: { $ne: "REJECTED" } };
+  if (month) match.month = month;
+
+  const [visitRows, sampleRows, giftRows, doctors] = await Promise.all([
+    DcrModel.aggregate([
+      { $match: match },
+      { $group: { _id: "$doctorId", visitCount: { $sum: 1 }, lastVisitDate: { $max: "$visitDate" } } }
+    ]),
+    DcrModel.aggregate([
+      { $match: match },
+      { $unwind: { path: "$samplesGiven", preserveNullAndEmptyArrays: true } },
+      { $match: { samplesGiven: { $ne: null } } },
+      { $group: { _id: "$doctorId", totalSamples: { $sum: "$samplesGiven.qty" } } }
+    ]),
+    DcrModel.aggregate([
+      { $match: match },
+      { $unwind: { path: "$inputsGiven", preserveNullAndEmptyArrays: true } },
+      { $match: { inputsGiven: { $ne: null } } },
+      { $group: { _id: "$doctorId", totalGifts: { $sum: "$inputsGiven.qty" }, totalGiftValue: { $sum: { $ifNull: ["$inputsGiven.valueRs", 0] } } } }
+    ]),
+    DoctorModel.find({ tenantSlug, status: "ACTIVE" }).lean()
+  ]);
+
+  const visitMap = new Map(visitRows.map((r) => [String(r._id), r]));
+  const sampleMap = new Map(sampleRows.map((r) => [String(r._id), r.totalSamples]));
+  const giftMap = new Map(giftRows.map((r) => [String(r._id), r]));
+  const thresholdRaw = await getConfigValue(tenantSlug, "GIFT_VALUE_THRESHOLD_RS");
+  const threshold = typeof thresholdRaw === "number" ? thresholdRaw : Number(DEFAULT_CONFIG.GIFT_VALUE_THRESHOLD_RS);
+
+  const data = doctors.map((doctor) => {
+    const id = String(doctor._id);
+    const visit = visitMap.get(id);
+    const gift = giftMap.get(id);
+    return {
+      doctorId: id,
+      doctorName: doctor.name,
+      specialty: doctor.specialty,
+      assignedMR: doctor.mappedEmployeeCode ?? null,
+      totalVisits: visit?.visitCount ?? 0,
+      lastVisitDate: visit?.lastVisitDate ?? null,
+      totalSamples: sampleMap.get(id) ?? 0,
+      totalGifts: gift?.totalGifts ?? 0,
+      totalGiftValueRs: gift?.totalGiftValue ?? 0,
+      overGiftThreshold: (gift?.totalGiftValue ?? 0) > threshold
+    };
+  });
+
+  res.json({ data, month: month ?? "all", thresholdRs: threshold });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Platform settings — GIFT_VALUE_THRESHOLD_RS (PRD 12.3B "Exact Solution":
+// "Store GIFT_VALUE_THRESHOLD_RS in CompanyConfig model, default 500. Admin
+// can edit in Platform Settings.")
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get("/config", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const rows = await CompanyConfigModel.find({ tenantSlug }).lean();
+  const byKey = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  res.json({ data: { ...DEFAULT_CONFIG, ...byKey } });
+}));
+
+companyRouter.patch("/config/:key", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const { value } = z.object({ value: z.union([z.number(), z.string(), z.boolean()]) }).parse(req.body);
+  const row = await CompanyConfigModel.findOneAndUpdate(
+    { tenantSlug, key: req.params.key },
+    { tenantSlug, key: req.params.key, value, updatedBy: req.auth!.sub },
+    { upsert: true, new: true }
+  );
+  await audit("COMPANY_CONFIG_UPDATED", "CompanyConfig", String(row._id), { tenantSlug, key: req.params.key, value });
+  res.json({ data: serializeDocument(row) });
 }));
 

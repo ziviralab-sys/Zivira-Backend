@@ -3,8 +3,27 @@ import bcrypt from "bcryptjs";
 import { asyncHandler } from "../http/async-handler.js";
 import { UserModel } from "../models/user.model.js";
 import { EmployeeModel } from "../models/employee.model.js";
+import { runExactTenSeed } from "../seed/exact-10.js";
 
 export const seedRouter = Router();
+
+// Reset EVERY master dataset (legacy models + all 54 generic masters-registry
+// tabs) to exactly 10 cross-linked records per tenant. Same secret-header
+// pattern as /run below — exists because Render's free tier has no shell
+// access, so this is the only way to run scripts/seed-exact-10.ts against
+// the live database (PRD Section 5.4 / 18).
+//
+//   curl -X POST https://<backend>/api/seed/exact-10 -H "x-seed-secret: <SEED_SECRET>"
+seedRouter.post("/exact-10", asyncHandler(async (req, res) => {
+  const secret = req.headers["x-seed-secret"];
+  if (!secret || secret !== process.env.SEED_SECRET) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+
+  await runExactTenSeed();
+  res.json({ success: true, message: "Every master dataset reset to exactly 10 records for tenant zivira-labs." });
+}));
 
 // ONE-TIME seed endpoint — disable after use by removing SEED_SECRET env var
 seedRouter.post("/run", asyncHandler(async (req, res) => {
