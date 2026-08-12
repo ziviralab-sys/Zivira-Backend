@@ -16,6 +16,7 @@ import { audit } from "../utils/audit.js";
 import { serializeDocument } from "../utils/serialize.js";
 import { createTourPlanWithRetry } from "../utils/tour-plan-id.js";
 import { createExpenseClaimWithRetry } from "../utils/expense-claim-id.js";
+import { enrichTourPlansWithNames } from "../utils/enrich-tour-plans.js";
 
 // PRD 12.3B — fixed gift/input item-type list for the compliance-tracked
 // picker (Pen, Calendar, Notepad, Literature, ...). Kept as a constant so
@@ -256,7 +257,7 @@ fieldRouter.get("/tour-plans", asyncHandler(async (req, res) => {
   const tenantSlug = req.auth!.tenantSlug!;
   const employee = await getFieldProfile(req.auth!.sub);
   const tps = await TourPlanModel.find({ tenantSlug, employeeCode: employee.employeeCode }).sort({ createdAt: -1 });
-  res.json({ data: tps.map(serializeDocument) });
+  res.json({ data: await enrichTourPlansWithNames(tenantSlug, tps) });
 }));
 
 fieldRouter.post("/tour-plans", asyncHandler(async (req, res) => {
@@ -309,7 +310,8 @@ fieldRouter.post("/tour-plans", asyncHandler(async (req, res) => {
   );
 
   await audit("FIELD_TOUR_PLAN_SUBMITTED", "TourPlan", String(created._id), { tenantSlug, employeeCode: employee.employeeCode, tpId: created.tpId });
-  res.status(201).json({ data: serializeDocument(created) });
+  const [enriched] = await enrichTourPlansWithNames(tenantSlug, [created]);
+  res.status(201).json({ data: enriched });
 }));
 
 // ── Expense Claims — the GST Branch a Tour Plan carries is what a claim

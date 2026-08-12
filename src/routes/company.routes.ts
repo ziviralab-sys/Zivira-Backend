@@ -31,6 +31,7 @@ import { UnlistedDoctorModel } from "../models/unlisted-doctor.model.js";
 import { CompanyBranchModel } from "../models/company-branch.model.js";
 import { TourPlanModel } from "../models/tour-plan.model.js";
 import { ExpenseClaimModel } from "../models/expense-claim.model.js";
+import { enrichTourPlansWithNames } from "../utils/enrich-tour-plans.js";
 import { CompanyConfigModel, DEFAULT_CONFIG, getConfigValue } from "../models/company-config.model.js";
 
 // Case-insensitive exact match, so "division" filters agree regardless of how a value
@@ -1066,7 +1067,7 @@ companyRouter.get("/tour-plans", asyncHandler(async (req, res) => {
   if (typeof req.query.month === "string" && req.query.month) query.month = req.query.month;
   if (typeof req.query.status === "string" && req.query.status) query.status = req.query.status;
   const tps = await TourPlanModel.find(query).sort({ createdAt: -1 }).limit(1000);
-  res.json({ data: tps.map(serializeDocument) });
+  res.json({ data: await enrichTourPlansWithNames(tenantSlug, tps) });
 }));
 
 // ══════════════════════════════════════════════════════════════════════

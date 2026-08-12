@@ -14,6 +14,7 @@ import { audit } from "../utils/audit.js";
 import { serializeDocument } from "../utils/serialize.js";
 import { createTourPlanWithRetry } from "../utils/tour-plan-id.js";
 import { notifyManager } from "../utils/notify.js";
+import { enrichTourPlansWithNames } from "../utils/enrich-tour-plans.js";
 
 export const managerRouter = Router();
 managerRouter.use(requireAuth);
@@ -156,7 +157,7 @@ function currentUtcMonth() {
 managerRouter.get("/tour-plans", asyncHandler(async (req, res) => {
   const mgr = await getManagerProfile(req.auth!.sub);
   const tps = await TourPlanModel.find({ tenantSlug: mgr.tenantSlug, assignedManager: mgr.employeeCode }).sort({ createdAt: -1 });
-  res.json({ data: tps.map(serializeDocument) });
+  res.json({ data: await enrichTourPlansWithNames(mgr.tenantSlug, tps) });
 }));
 
 // GET /manager/tour-plans/cross-team — ALL TPs across the tenant, for
@@ -165,7 +166,7 @@ managerRouter.get("/tour-plans", asyncHandler(async (req, res) => {
 managerRouter.get("/tour-plans/cross-team", asyncHandler(async (req, res) => {
   const mgr = await getManagerProfile(req.auth!.sub);
   const tps = await TourPlanModel.find({ tenantSlug: mgr.tenantSlug }).sort({ createdAt: -1 }).limit(500);
-  res.json({ data: tps.map(serializeDocument) });
+  res.json({ data: await enrichTourPlansWithNames(mgr.tenantSlug, tps) });
 }));
 
 // PATCH /manager/tour-plans/:tpId/approve — only the assignedManager may approve
@@ -339,7 +340,8 @@ managerRouter.post("/tour-plans/:tpId/reassign", asyncHandler(async (req, res) =
     await original.save();
   }
 
-  res.status(201).json({ data: { original: serializeDocument(original), created: serializeDocument(created) } });
+  const [enrichedOriginal, enrichedCreated] = await enrichTourPlansWithNames(mgr.tenantSlug, [original, created]);
+  res.status(201).json({ data: { original: enrichedOriginal, created: enrichedCreated } });
 }));
 
 // ══════════════════════════════════════════════════════════════════════
