@@ -17,6 +17,7 @@ import { serializeDocument } from "../utils/serialize.js";
 import { createTourPlanWithRetry } from "../utils/tour-plan-id.js";
 import { createExpenseClaimWithRetry } from "../utils/expense-claim-id.js";
 import { enrichTourPlansWithNames } from "../utils/enrich-tour-plans.js";
+import { enrichWithEmployeeNames } from "../utils/enrich-employee-names.js";
 
 // PRD 12.3B — fixed gift/input item-type list for the compliance-tracked
 // picker (Pen, Calendar, Notepad, Literature, ...). Kept as a constant so
@@ -332,7 +333,8 @@ fieldRouter.get("/expense-claims", asyncHandler(async (req, res) => {
   const tenantSlug = req.auth!.tenantSlug!;
   const employee = await getFieldProfile(req.auth!.sub);
   const claims = await ExpenseClaimModel.find({ tenantSlug, employeeCode: employee.employeeCode }).sort({ createdAt: -1 });
-  res.json({ data: claims.map(serializeDocument) });
+  const serialized = claims.map(serializeDocument);
+  res.json({ data: await enrichWithEmployeeNames(tenantSlug, serialized, ["assignedManager"]) });
 }));
 
 fieldRouter.post("/expense-claims", asyncHandler(async (req, res) => {

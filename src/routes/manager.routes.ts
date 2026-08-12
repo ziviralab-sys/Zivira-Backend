@@ -15,6 +15,7 @@ import { serializeDocument } from "../utils/serialize.js";
 import { createTourPlanWithRetry } from "../utils/tour-plan-id.js";
 import { notifyManager } from "../utils/notify.js";
 import { enrichTourPlansWithNames } from "../utils/enrich-tour-plans.js";
+import { enrichWithEmployeeNames } from "../utils/enrich-employee-names.js";
 
 export const managerRouter = Router();
 managerRouter.use(requireAuth);
@@ -101,7 +102,8 @@ managerRouter.get("/dcrs", asyncHandler(async (req, res) => {
     tenantSlug: mgr.tenantSlug,
     employeeCode: { $in: codes }
   }).sort({ createdAt: -1 }).limit(100).populate("doctorId");
-  res.json({ data: dcrs.map(serializeDocument) });
+  const serialized = dcrs.map(serializeDocument);
+  res.json({ data: await enrichWithEmployeeNames(mgr.tenantSlug, serialized, ["employeeCode", "managerApprovedBy"]) });
 }));
 
 // POST /manager/dcrs/:id/approve
@@ -353,13 +355,15 @@ managerRouter.post("/tour-plans/:tpId/reassign", asyncHandler(async (req, res) =
 managerRouter.get("/expense-claims", asyncHandler(async (req, res) => {
   const mgr = await getManagerProfile(req.auth!.sub);
   const claims = await ExpenseClaimModel.find({ tenantSlug: mgr.tenantSlug, assignedManager: mgr.employeeCode }).sort({ createdAt: -1 });
-  res.json({ data: claims.map(serializeDocument) });
+  const serialized = claims.map(serializeDocument);
+  res.json({ data: await enrichWithEmployeeNames(mgr.tenantSlug, serialized, ["assignedManager"]) });
 }));
 
 managerRouter.get("/expense-claims/cross-team", asyncHandler(async (req, res) => {
   const mgr = await getManagerProfile(req.auth!.sub);
   const claims = await ExpenseClaimModel.find({ tenantSlug: mgr.tenantSlug }).sort({ createdAt: -1 });
-  res.json({ data: claims.map(serializeDocument) });
+  const serialized = claims.map(serializeDocument);
+  res.json({ data: await enrichWithEmployeeNames(mgr.tenantSlug, serialized, ["assignedManager"]) });
 }));
 
 managerRouter.patch("/expense-claims/:claimId/approve", asyncHandler(async (req, res) => {
@@ -417,6 +421,7 @@ managerRouter.get("/visit-coverage", asyncHandler(async (req, res) => {
     doctorId: String(doctor._id),
     doctorName: doctor.name,
     mappedEmployeeCode: doctor.mappedEmployeeCode,
+    mappedEmployeeName: doctor.mappedEmployeeName,
     cells: codes.map((code) => ({
       employeeCode: code,
       visitCount: cellMap.get(`${String(doctor._id)}:${code}`) ?? 0

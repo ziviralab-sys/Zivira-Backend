@@ -32,6 +32,7 @@ import { CompanyBranchModel } from "../models/company-branch.model.js";
 import { TourPlanModel } from "../models/tour-plan.model.js";
 import { ExpenseClaimModel } from "../models/expense-claim.model.js";
 import { enrichTourPlansWithNames } from "../utils/enrich-tour-plans.js";
+import { enrichWithEmployeeNames } from "../utils/enrich-employee-names.js";
 import { CompanyConfigModel, DEFAULT_CONFIG, getConfigValue } from "../models/company-config.model.js";
 
 // Case-insensitive exact match, so "division" filters agree regardless of how a value
@@ -249,7 +250,8 @@ companyRouter.get(
     }
 
     const dcrs = await DcrModel.find(query).sort({ createdAt: -1 }).limit(200).populate("doctorId");
-    res.json({ data: dcrs.map(serializeDocument) });
+    const serialized = dcrs.map(serializeDocument);
+    res.json({ data: await enrichWithEmployeeNames(tenantSlug, serialized, ["employeeCode", "managerApprovedBy"]) });
   })
 );
 
@@ -258,7 +260,8 @@ companyRouter.get(
   asyncHandler(async (req, res) => {
     const dcr = await DcrModel.findOne({ _id: req.params.id, tenantSlug: req.auth!.tenantSlug }).populate("doctorId");
     if (!dcr) throw new Error("DCR not found");
-    res.json({ data: serializeDocument(dcr) });
+    const [enriched] = await enrichWithEmployeeNames(req.auth!.tenantSlug!, [serializeDocument(dcr)], ["employeeCode", "managerApprovedBy"]);
+    res.json({ data: enriched });
   })
 );
 
@@ -1081,7 +1084,8 @@ companyRouter.get("/expense-claims", asyncHandler(async (req, res) => {
   if (typeof req.query.status === "string" && req.query.status) query.status = req.query.status;
   if (typeof req.query.gstBranchCode === "string" && req.query.gstBranchCode) query.gstBranchCode = req.query.gstBranchCode;
   const claims = await ExpenseClaimModel.find(query).sort({ createdAt: -1 }).limit(1000);
-  res.json({ data: claims.map(serializeDocument) });
+  const serialized = claims.map(serializeDocument);
+  res.json({ data: await enrichWithEmployeeNames(tenantSlug, serialized, ["assignedManager"]) });
 }));
 
 companyRouter.get("/expense-claims/branch-summary", asyncHandler(async (req, res) => {
@@ -1244,6 +1248,7 @@ companyRouter.get("/doctor-coverage", asyncHandler(async (req, res) => {
       doctorName: doctor.name,
       specialty: doctor.specialty,
       assignedMR: doctor.mappedEmployeeCode ?? null,
+      assignedMRName: doctor.mappedEmployeeName ?? null,
       totalVisits: visit?.visitCount ?? 0,
       lastVisitDate: visit?.lastVisitDate ?? null,
       totalSamples: sampleMap.get(id) ?? 0,
