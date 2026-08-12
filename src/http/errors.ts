@@ -3,7 +3,12 @@ import type { NextFunction, Request, Response } from "express";
 export class HttpError extends Error {
   constructor(
     public statusCode: number,
-    message: string
+    message: string,
+    // Optional machine-readable payload alongside the human message — e.g.
+    // the tpId of a conflicting Tour Plan, so the frontend can offer a real
+    // next action ("add these locations to it instead") rather than just
+    // displaying red text with no way forward.
+    public details?: Record<string, unknown>
   ) {
     super(message);
   }
@@ -40,7 +45,8 @@ export function errorHandler(error: unknown, _req: Request, res: Response, _next
   res.status(statusCode).json({
     error: {
       message,
-      statusCode
+      statusCode,
+      ...(error instanceof HttpError && error.details ? { details: error.details } : {})
     }
   });
 }

@@ -284,7 +284,8 @@ fieldRouter.post("/tour-plans", asyncHandler(async (req, res) => {
   if (existingActive) {
     throw new HttpError(
       409,
-      `You already have an active Tour Plan (${existingActive.tpId}) for ${body.month}. Ask your manager to void or reassign it before submitting a new one.`
+      `You already have an active Tour Plan (${existingActive.tpId}) for ${body.month}. Add these locations to it instead, or ask your manager to void/reassign it first.`,
+      { existingTpId: existingActive.tpId }
     );
   }
 
@@ -313,6 +314,47 @@ fieldRouter.post("/tour-plans", asyncHandler(async (req, res) => {
   await audit("FIELD_TOUR_PLAN_SUBMITTED", "TourPlan", String(created._id), { tenantSlug, employeeCode: employee.employeeCode, tpId: created.tpId });
   const [enriched] = await enrichTourPlansWithNames(tenantSlug, [created]);
   res.status(201).json({ data: enriched });
+}));
+
+// PATCH /field/tour-plans/:tpId/locations — the escape hatch for the
+// one-active-TP-per-month guard above: once an MR already has a live Tour
+// Plan for the month, POST /tour-plans correctly refuses to create a second
+// one, but until now there was no way to add more planned locations to the
+// existing one either — the MR was stuck with a dead-end error and no next
+// action short of asking their manager to void/reassign. This lets the
+// owning MR append locations to their own Tour Plan directly.
+const addLocationsSchema = z.object({
+  locations: z.array(tourPlanLocationSchema).min(1, "At least one location is required")
+});
+
+fieldRouter.patch("/tour-plans/:tpId/locations", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const employee = await getFieldProfile(req.auth!.sub);
+  const body = addLocationsSchema.parse(req.body);
+
+  const tp = await TourPlanModel.findOne({ tenantSlug, tpId: req.params.tpId, employeeCode: employee.employeeCode });
+  if (!tp) throw new HttpError(404, "Tour Plan not found");
+  if (tp.status === "VOIDED" || tp.status === "REJECTED") {
+    throw new HttpError(400, `Tour Plan ${tp.tpId} is ${tp.status.toLowerCase()} — submit a new Tour Plan instead of adding to this one.`);
+  }
+
+  tp.locations.push(...body.locations);
+  // Adding new locations changes what was reviewed — if a manager had
+  // already approved this plan, send it back to SUBMITTED so the new
+  // locations actually get looked at instead of silently riding along on
+  // an old approval.
+  if (tp.status === "APPROVED") {
+    tp.status = "SUBMITTED";
+    tp.approvedBy = undefined;
+    tp.approvedAt = undefined;
+  }
+  await tp.save();
+
+  await audit("FIELD_TOUR_PLAN_LOCATIONS_ADDED", "TourPlan", String(tp._id), {
+    tenantSlug, employeeCode: employee.employeeCode, tpId: tp.tpId, addedCount: body.locations.length
+  });
+  const [enriched] = await enrichTourPlansWithNames(tenantSlug, [tp]);
+  res.json({ data: enriched });
 }));
 
 // ── Expense Claims — the GST Branch a Tour Plan carries is what a claim
