@@ -30,6 +30,7 @@ import { HospitalModel } from "../models/hospital.model.js";
 import { UnlistedDoctorModel } from "../models/unlisted-doctor.model.js";
 import { CompanyBranchModel } from "../models/company-branch.model.js";
 import { TourPlanModel } from "../models/tour-plan.model.js";
+import { ExpenseClaimModel } from "../models/expense-claim.model.js";
 import { CompanyConfigModel, DEFAULT_CONFIG, getConfigValue } from "../models/company-config.model.js";
 
 // Case-insensitive exact match, so "division" filters agree regardless of how a value
@@ -1066,6 +1067,48 @@ companyRouter.get("/tour-plans", asyncHandler(async (req, res) => {
   if (typeof req.query.status === "string" && req.query.status) query.status = req.query.status;
   const tps = await TourPlanModel.find(query).sort({ createdAt: -1 }).limit(1000);
   res.json({ data: tps.map(serializeDocument) });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Expense Claims — Admin-wide view + branch/GST report (Section 12.5
+// follow-up: GST Branch → claims linkage). Filterable by month/status/branch.
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get("/expense-claims", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const query: Record<string, unknown> = { tenantSlug };
+  if (typeof req.query.month === "string" && req.query.month) query.month = req.query.month;
+  if (typeof req.query.status === "string" && req.query.status) query.status = req.query.status;
+  if (typeof req.query.gstBranchCode === "string" && req.query.gstBranchCode) query.gstBranchCode = req.query.gstBranchCode;
+  const claims = await ExpenseClaimModel.find(query).sort({ createdAt: -1 }).limit(1000);
+  res.json({ data: claims.map(serializeDocument) });
+}));
+
+companyRouter.get("/expense-claims/branch-summary", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const month = typeof req.query.month === "string" && req.query.month ? req.query.month : undefined;
+
+  const match: Record<string, unknown> = { tenantSlug };
+  if (month) match.month = month;
+
+  const rows = await ExpenseClaimModel.aggregate([
+    { $match: match },
+    { $group: {
+      _id: { gstBranchCode: "$gstBranchCode", gstBranchName: "$gstBranchName" },
+      totalClaims: { $sum: 1 },
+      totalAmountRs: { $sum: "$amountRs" },
+      approvedAmountRs: { $sum: { $cond: [{ $eq: ["$status", "APPROVED"] }, "$amountRs", 0] } },
+      pendingAmountRs: { $sum: { $cond: [{ $eq: ["$status", "SUBMITTED"] }, "$amountRs", 0] } },
+      rejectedAmountRs: { $sum: { $cond: [{ $eq: ["$status", "REJECTED"] }, "$amountRs", 0] } }
+    } },
+    { $project: {
+      _id: 0,
+      gstBranchCode: "$_id.gstBranchCode",
+      gstBranchName: "$_id.gstBranchName",
+      totalClaims: 1, totalAmountRs: 1, approvedAmountRs: 1, pendingAmountRs: 1, rejectedAmountRs: 1
+    } },
+    { $sort: { totalAmountRs: -1 } }
+  ]);
+  res.json({ data: rows, month: month ?? "all" });
 }));
 
 // ══════════════════════════════════════════════════════════════════════

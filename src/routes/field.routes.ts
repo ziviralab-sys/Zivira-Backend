@@ -11,9 +11,11 @@ import { UserModel } from "../models/user.model.js";
 import { ProductModel } from "../models/product.model.js";
 import { CompanyBranchModel } from "../models/company-branch.model.js";
 import { TourPlanModel } from "../models/tour-plan.model.js";
+import { ExpenseClaimModel } from "../models/expense-claim.model.js";
 import { audit } from "../utils/audit.js";
 import { serializeDocument } from "../utils/serialize.js";
 import { createTourPlanWithRetry } from "../utils/tour-plan-id.js";
+import { createExpenseClaimWithRetry } from "../utils/expense-claim-id.js";
 
 // PRD 12.3B — fixed gift/input item-type list for the compliance-tracked
 // picker (Pen, Calendar, Notepad, Literature, ...). Kept as a constant so
@@ -266,6 +268,24 @@ fieldRouter.post("/tour-plans", asyncHandler(async (req, res) => {
     throw new HttpError(400, "You have no reporting manager assigned — contact your admin before submitting a Tour Plan.");
   }
 
+  // Root cause of the manager-portal "already has an active Tour Plan" false
+  // positives: nothing stopped an MR from submitting a second, wholly
+  // unrelated Tour Plan for a month that already has one live. Block that
+  // here so at most one non-VOIDED, non-REJECTED TP ever exists per MR per
+  // month — reassignment/void is the only way to replace it after that.
+  const existingActive = await TourPlanModel.findOne({
+    tenantSlug,
+    employeeCode: employee.employeeCode,
+    month: body.month,
+    status: { $in: ["DRAFT", "SUBMITTED", "APPROVED"] }
+  });
+  if (existingActive) {
+    throw new HttpError(
+      409,
+      `You already have an active Tour Plan (${existingActive.tpId}) for ${body.month}. Ask your manager to void or reassign it before submitting a new one.`
+    );
+  }
+
   let gstBranchName: string | undefined;
   if (body.gstBranchCode) {
     const branch = await CompanyBranchModel.findOne({ tenantSlug, gstNumber: body.gstBranchCode.toUpperCase().trim() });
@@ -289,6 +309,66 @@ fieldRouter.post("/tour-plans", asyncHandler(async (req, res) => {
   );
 
   await audit("FIELD_TOUR_PLAN_SUBMITTED", "TourPlan", String(created._id), { tenantSlug, employeeCode: employee.employeeCode, tpId: created.tpId });
+  res.status(201).json({ data: serializeDocument(created) });
+}));
+
+// ── Expense Claims — the GST Branch a Tour Plan carries is what a claim
+// inherits (Section 12.5 follow-up: "how should [the GST branch] redirect to
+// the admin/manager to claim their expenses — create a linkage for this").
+// A claim can only be filed against one of the MR's own Tour Plans, and it
+// always carries that TP's gstBranchCode/gstBranchName forward so Admin can
+// report claims by branch.
+const expenseClaimSubmitSchema = z.object({
+  tpId: z.string().min(1, "Select the Tour Plan this expense belongs to"),
+  category: z.enum(["Travel", "Lodging", "Food", "Local Conveyance", "Other"]),
+  expenseDate: z.string().min(1, "Expense date is required"),
+  amountRs: z.number().min(0.01, "Amount must be greater than 0"),
+  description: z.string().optional()
+});
+
+fieldRouter.get("/expense-claims", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const employee = await getFieldProfile(req.auth!.sub);
+  const claims = await ExpenseClaimModel.find({ tenantSlug, employeeCode: employee.employeeCode }).sort({ createdAt: -1 });
+  res.json({ data: claims.map(serializeDocument) });
+}));
+
+fieldRouter.post("/expense-claims", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const employee = await getFieldProfile(req.auth!.sub);
+  const body = expenseClaimSubmitSchema.parse(req.body);
+
+  const tp = await TourPlanModel.findOne({ tenantSlug, tpId: body.tpId, employeeCode: employee.employeeCode });
+  if (!tp) throw new HttpError(404, "Tour Plan not found — expenses can only be claimed against your own Tour Plans.");
+  if (tp.status === "VOIDED" || tp.status === "REJECTED") {
+    throw new HttpError(400, `Tour Plan ${tp.tpId} is ${tp.status.toLowerCase()} and can no longer receive expense claims.`);
+  }
+  if (!employee.reportingManager && !tp.assignedManager) {
+    throw new HttpError(400, "No manager assigned to route this claim to — contact your admin.");
+  }
+
+  const created = await createExpenseClaimWithRetry(tenantSlug, employee.employeeCode, tp.month, (claimId) =>
+    ExpenseClaimModel.create({
+      tenantSlug,
+      claimId,
+      employeeCode: employee.employeeCode,
+      employeeName: employee.name,
+      assignedManager: tp.assignedManager || employee.reportingManager,
+      tpId: tp.tpId,
+      month: tp.month,
+      gstBranchCode: tp.gstBranchCode,
+      gstBranchName: tp.gstBranchName,
+      category: body.category,
+      expenseDate: body.expenseDate,
+      amountRs: body.amountRs,
+      description: body.description,
+      status: "SUBMITTED"
+    })
+  );
+
+  await audit("FIELD_EXPENSE_CLAIM_SUBMITTED", "ExpenseClaim", String(created._id), {
+    tenantSlug, employeeCode: employee.employeeCode, claimId: created.claimId, tpId: tp.tpId, amountRs: body.amountRs
+  });
   res.status(201).json({ data: serializeDocument(created) });
 }));
 

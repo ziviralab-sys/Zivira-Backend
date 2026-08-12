@@ -39,6 +39,7 @@ import { ProductModel } from "../models/product.model.js";
 import { StockistModel } from "../models/stockist.model.js";
 import { CompanyBranchModel } from "../models/company-branch.model.js";
 import { TourPlanModel } from "../models/tour-plan.model.js";
+import { ExpenseClaimModel } from "../models/expense-claim.model.js";
 import { SubdivisionModel } from "../models/subdivision.model.js";
 import { ProductCategoryModel } from "../models/product-category.model.js";
 import { ProductBrandModel } from "../models/product-brand.model.js";
@@ -391,18 +392,32 @@ async function seedTourPlans() {
   }
 
   const docs: ReturnType<typeof makeTp>[] = [];
+  const mr001 = mrs.find((m) => m.code === "MR-001") ?? mrs[0];
 
   // One straightforward TP per MR — first two pre-approved, rest pending
   // (so the Manager portal has real SUBMITTED rows to approve/reject).
+  // BUG FIXED: this used to ALSO create a base TP for MR-001 here, on top of
+  // the separate voided+reassigned pair below — leaving MR-001 with two
+  // simultaneously "active" Tour Plans for the same month (their base TP
+  // plus the reassigned one). That's exactly the state the manager-portal
+  // reassign guard correctly refuses to resolve (there's no way to tell
+  // which of two independent active TPs is "the" one), which is what
+  // produced the false-positive "already has an active Tour Plan" error.
+  // MR-001 is skipped here — their only Tour Plan this month is the
+  // voided-then-reassigned pair created below.
   mrs.forEach((mr, i) => {
-    docs.push(makeTp(mr, i, i === 0 || i === 1
+    if (mr.code === mr001.code) return;
+    docs.push(makeTp(mr, i, mr.code === "MR-002" || mr.code === "SR-MR-001"
       ? { status: "APPROVED", approvedBy: mr.manager ?? undefined, approvedAt: daysAgo(2) }
       : { status: "SUBMITTED" }));
   });
 
-  // Cross-manager void + reassign demo (PRD 12.1) — MR-001's TP is voided by
-  // a second manager and replaced with a new linked TP under their chain.
-  const mr001 = mrs.find((m) => m.code === "MR-001") ?? mrs[0];
+  // Cross-manager void + reassign demo (PRD 12.1) — MR-001's ONLY Tour Plan
+  // for the month starts life under their primary manager, gets voided by a
+  // second manager, and replaced with a new linked TP under that manager's
+  // chain. Keeping this as MR-001's sole TP for the month means they always
+  // have exactly one active plan (the reassigned one) — a real reassign of
+  // it will succeed instead of tripping the "separate active TP" guard.
   const crossManager = EMPLOYEES.find((e) => e.role === "ABM" && e.code !== mr001.manager)?.code ?? mr001.manager;
   const voided = makeTp(mr001, 6, {
     status: "VOIDED", voidedBy: crossManager ?? undefined, voidedAt: daysAgo(1), voidReason: "Accompanying Manager B's team on a joint tour this month"
@@ -418,16 +433,76 @@ async function seedTourPlans() {
   const mr002 = mrs.find((m) => m.code !== mr001.code) ?? mrs[1];
   docs.push(makeTp(mr002, 7, { status: "REJECTED", rejectReason: "Overlaps with last month's uncovered patch — resubmit with corrected route" }));
 
-  // Pad up to exactly N with additional SUBMITTED plans (still strictly
-  // sequential per employee — no gaps).
+  // Pad up to exactly N. Every MR already has exactly one active (DRAFT/
+  // SUBMITTED/APPROVED) Tour Plan at this point from the loops above — a
+  // second SUBMITTED/APPROVED plan for the same MR+month would recreate the
+  // very "two active TPs" bug this seed was just fixed to avoid. REJECTED
+  // is terminal and never counts as active (matches the submit-time guard
+  // in field.routes.ts and the reassign guard in manager.routes.ts), so pad
+  // with additional REJECTED history instead — still realistic, never
+  // conflicts, sequence numbers stay strictly sequential per employee.
   let padIdx = 8;
   while (docs.length < N) {
     const mr = mrs[padIdx % mrs.length];
-    docs.push(makeTp(mr, padIdx, { status: "SUBMITTED" }));
+    docs.push(makeTp(mr, padIdx, { status: "REJECTED", rejectReason: "Route overlaps with a colleague's patch — resubmit with corrected locations" }));
     padIdx++;
   }
 
-  await reset(TourPlanModel, { tenantSlug: TENANT }, docs.slice(0, N), "TourPlan");
+  const finalDocs = docs.slice(0, N);
+  await reset(TourPlanModel, { tenantSlug: TENANT }, finalDocs, "TourPlan");
+  return finalDocs;
+}
+
+// PRD 12.5 follow-up — "how it should be redirect to the admin, manager, to
+// claim their expenses ... create a linkage for this." Demo Expense Claims
+// filed against the Tour Plans just seeded above, inheriting their GST
+// branch — gives Admin/Manager a realistic branch-wise claims report out of
+// the box instead of an empty screen.
+async function seedExpenseClaims(tourPlanDocs: Awaited<ReturnType<typeof seedTourPlans>>) {
+  console.log("\n── Expense Claims (GST Branch → claims linkage demo data) ──");
+
+  // Claims can only ever be filed against a live Tour Plan (VOIDED/REJECTED
+  // ones are blocked by the field route) — same rule applied here.
+  const eligible = tourPlanDocs.filter((tp) => tp.status !== "VOIDED" && tp.status !== "REJECTED");
+  const categories = ["Travel", "Lodging", "Food", "Local Conveyance", "Other"] as const;
+
+  const claimSeq = new Map<string, number>();
+  function nextClaimId(employeeCode: string, month: string) {
+    const key = `${employeeCode}-${month}`;
+    const n = (claimSeq.get(key) ?? 0) + 1;
+    claimSeq.set(key, n);
+    return `EXP-${month}-${employeeCode.toUpperCase()}-${String(n).padStart(3, "0")}`;
+  }
+
+  const docs = [];
+  for (let i = 0; i < N; i++) {
+    const tp = eligible[i % eligible.length];
+    const status = i < 5 ? "APPROVED" : i < 8 ? "SUBMITTED" : "REJECTED";
+    const category = categories[i % categories.length];
+    docs.push({
+      tenantSlug: TENANT,
+      claimId: nextClaimId(tp.employeeCode, tp.month),
+      employeeCode: tp.employeeCode,
+      employeeName: tp.employeeName,
+      assignedManager: tp.assignedManager,
+      tpId: tp.tpId,
+      month: tp.month,
+      gstBranchCode: tp.gstBranchCode,
+      gstBranchName: tp.gstBranchName,
+      category,
+      expenseDate: isoDate(i + 1),
+      amountRs: 500 + i * 275,
+      description: `${category} expense during Tour Plan ${tp.tpId}`,
+      status,
+      approvedBy: status === "APPROVED" ? tp.assignedManager : undefined,
+      approvedAt: status === "APPROVED" ? daysAgo(1) : undefined,
+      rejectedBy: status === "REJECTED" ? tp.assignedManager : undefined,
+      rejectReason: status === "REJECTED" ? "Receipt not attached — resubmit with proof" : undefined,
+      rejectedAt: status === "REJECTED" ? daysAgo(1) : undefined
+    });
+  }
+
+  await reset(ExpenseClaimModel, { tenantSlug: TENANT }, docs, "ExpenseClaim");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -779,7 +854,8 @@ export async function runExactTenSeed() {
   console.log(`Connected. Resetting every master dataset for tenant "${TENANT}" to exactly ${N} records each...`);
 
   await seedLegacyModels();
-  await seedTourPlans();
+  const tourPlanDocs = await seedTourPlans();
+  await seedExpenseClaims(tourPlanDocs);
   await seedIdentityMasters();
   await seedRemainingGenericMasters();
   await ensureDemoLoginsExist();

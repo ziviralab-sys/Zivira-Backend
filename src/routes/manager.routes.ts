@@ -9,6 +9,7 @@ import { DoctorModel } from "../models/doctor.model.js";
 import { EmployeeModel } from "../models/employee.model.js";
 import { UserModel } from "../models/user.model.js";
 import { TourPlanModel } from "../models/tour-plan.model.js";
+import { ExpenseClaimModel } from "../models/expense-claim.model.js";
 import { audit } from "../utils/audit.js";
 import { serializeDocument } from "../utils/serialize.js";
 import { createTourPlanWithRetry } from "../utils/tour-plan-id.js";
@@ -234,6 +235,30 @@ managerRouter.patch("/tour-plans/:tpId/void", asyncHandler(async (req, res) => {
   res.json({ data: serializeDocument(tp) });
 }));
 
+// Walks the parentTpId (backward) and reassignedToTpId (forward) links from
+// a given TP to collect every tpId that belongs to the SAME reassignment
+// lineage — a single linked list, since each TP can only ever be reassigned
+// once (VOIDED is terminal). Used to tell "this TP was already reassigned
+// through this exact chain before" apart from "this MR has a genuinely
+// separate, unrelated Tour Plan" (see reassign guard below).
+async function buildTourPlanLineage(tenantSlug: string, root: InstanceType<typeof TourPlanModel>) {
+  const ids = new Set<string>([root.tpId]);
+
+  let cursor: InstanceType<typeof TourPlanModel> | null = root;
+  while (cursor?.parentTpId && !ids.has(cursor.parentTpId)) {
+    ids.add(cursor.parentTpId);
+    cursor = await TourPlanModel.findOne({ tenantSlug, tpId: cursor.parentTpId });
+  }
+
+  cursor = root;
+  while (cursor?.reassignedToTpId && !ids.has(cursor.reassignedToTpId)) {
+    ids.add(cursor.reassignedToTpId);
+    cursor = await TourPlanModel.findOne({ tenantSlug, tpId: cursor.reassignedToTpId });
+  }
+
+  return ids;
+}
+
 // POST /manager/tour-plans/:tpId/reassign — voids the original (if not
 // already voided) and creates a brand-new TP for the same MR under the
 // calling manager, linked back via parentTpId. Returns the new tpId.
@@ -243,19 +268,30 @@ managerRouter.post("/tour-plans/:tpId/reassign", asyncHandler(async (req, res) =
   const original = await TourPlanModel.findOne({ tenantSlug: mgr.tenantSlug, tpId: req.params.tpId });
   if (!original) throw new HttpError(404, "Tour Plan not found");
 
-  // PRD "Exact Solution" — parentTpId chain becomes circular after Manager B
-  // reassigns: traverse the chain and reject if this MR+month already has a
-  // non-VOIDED TP (i.e. Manager A reassigning back to a TP that's already
-  // live under someone else).
-  const alreadyLive = await TourPlanModel.findOne({
+  // PRD "Exact Solution" — "parentTpId chain becomes circular after Manager
+  // B reassigns same MR+month already has a non-VOIDED TP" — this must only
+  // catch a genuinely SEPARATE, unrelated Tour Plan thread for this MR this
+  // month, not the TP being reassigned itself (or any earlier/later link in
+  // its own chain). A plain per-employee-per-month lookup without lineage
+  // awareness blocked EVERY reassign whenever an MR simply had more than one
+  // Tour Plan on record for the month — fixed by only flagging a conflict
+  // when the other active TP falls outside this TP's own lineage.
+  // "Active" here must match the definition the submit-time guard in
+  // field.routes.ts uses (DRAFT/SUBMITTED/APPROVED) — REJECTED and VOIDED
+  // are both terminal/inactive, so neither should ever block a reassign.
+  const lineage = await buildTourPlanLineage(mgr.tenantSlug, original);
+  const conflicting = await TourPlanModel.findOne({
     tenantSlug: mgr.tenantSlug,
     employeeCode: original.employeeCode,
     month: original.month,
-    status: { $ne: "VOIDED" },
-    tpId: { $ne: original.tpId }
+    status: { $in: ["DRAFT", "SUBMITTED", "APPROVED"] },
+    tpId: { $nin: Array.from(lineage) }
   });
-  if (alreadyLive) {
-    throw new HttpError(409, `${original.employeeName ?? original.employeeCode} already has an active Tour Plan (${alreadyLive.tpId}) for ${original.month}`);
+  if (conflicting) {
+    throw new HttpError(
+      409,
+      `${original.employeeName ?? original.employeeCode} already has a separate active Tour Plan (${conflicting.tpId}) for ${original.month} — void that one first, or reassign it instead.`
+    );
   }
 
   if (original.status !== "VOIDED") {
@@ -304,6 +340,58 @@ managerRouter.post("/tour-plans/:tpId/reassign", asyncHandler(async (req, res) =
   }
 
   res.status(201).json({ data: { original: serializeDocument(original), created: serializeDocument(created) } });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Expense Claims — GST Branch → claims linkage (Section 12.5 follow-up).
+// A claim is routed to whichever manager the Tour Plan it references is
+// currently assigned to, so reassigning a Tour Plan also carries its claims
+// to the new manager's queue.
+// ══════════════════════════════════════════════════════════════════════
+managerRouter.get("/expense-claims", asyncHandler(async (req, res) => {
+  const mgr = await getManagerProfile(req.auth!.sub);
+  const claims = await ExpenseClaimModel.find({ tenantSlug: mgr.tenantSlug, assignedManager: mgr.employeeCode }).sort({ createdAt: -1 });
+  res.json({ data: claims.map(serializeDocument) });
+}));
+
+managerRouter.get("/expense-claims/cross-team", asyncHandler(async (req, res) => {
+  const mgr = await getManagerProfile(req.auth!.sub);
+  const claims = await ExpenseClaimModel.find({ tenantSlug: mgr.tenantSlug }).sort({ createdAt: -1 });
+  res.json({ data: claims.map(serializeDocument) });
+}));
+
+managerRouter.patch("/expense-claims/:claimId/approve", asyncHandler(async (req, res) => {
+  const mgr = await getManagerProfile(req.auth!.sub);
+  const claim = await ExpenseClaimModel.findOne({ tenantSlug: mgr.tenantSlug, claimId: req.params.claimId });
+  if (!claim) throw new HttpError(404, "Expense claim not found");
+  if (claim.assignedManager !== mgr.employeeCode) throw new HttpError(403, "Only the assigned manager can approve this claim");
+  if (claim.status !== "SUBMITTED") throw new HttpError(400, `Claim is already ${claim.status}`);
+
+  claim.status = "APPROVED";
+  claim.approvedBy = mgr.employeeCode;
+  claim.approvedAt = new Date();
+  await claim.save();
+
+  await audit("MANAGER_EXPENSE_CLAIM_APPROVED", "ExpenseClaim", String(claim._id), { tenantSlug: mgr.tenantSlug, byManager: mgr.employeeCode, claimId: claim.claimId });
+  res.json({ data: serializeDocument(claim) });
+}));
+
+managerRouter.patch("/expense-claims/:claimId/reject", asyncHandler(async (req, res) => {
+  const mgr = await getManagerProfile(req.auth!.sub);
+  const { reason } = z.object({ reason: z.string().min(1, "A rejection reason is required") }).parse(req.body);
+  const claim = await ExpenseClaimModel.findOne({ tenantSlug: mgr.tenantSlug, claimId: req.params.claimId });
+  if (!claim) throw new HttpError(404, "Expense claim not found");
+  if (claim.assignedManager !== mgr.employeeCode) throw new HttpError(403, "Only the assigned manager can reject this claim");
+  if (claim.status !== "SUBMITTED") throw new HttpError(400, `Claim is already ${claim.status}`);
+
+  claim.status = "REJECTED";
+  claim.rejectedBy = mgr.employeeCode;
+  claim.rejectReason = reason;
+  claim.rejectedAt = new Date();
+  await claim.save();
+
+  await audit("MANAGER_EXPENSE_CLAIM_REJECTED", "ExpenseClaim", String(claim._id), { tenantSlug: mgr.tenantSlug, byManager: mgr.employeeCode, claimId: claim.claimId, reason });
+  res.json({ data: serializeDocument(claim) });
 }));
 
 // ══════════════════════════════════════════════════════════════════════
