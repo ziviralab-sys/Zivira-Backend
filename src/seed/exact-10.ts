@@ -340,41 +340,94 @@ async function seedTourPlans() {
   console.log("\n── Tour Plans (demo data for the new Void/Reassign workflow) ──");
   const mrs = EMPLOYEES.filter((e) => e.role === "MR" || e.role === "SR_MR");
   const month = new Date().toISOString().slice(0, 7);
-  const docs = mrs.slice(0, N > mrs.length ? mrs.length : N).map((mr, i) => ({
-    tenantSlug: TENANT,
-    tpId: `TP-${month}-${mr.code}-001`,
-    employeeCode: mr.code,
-    employeeName: mr.name,
-    primaryManager: mr.manager,
-    assignedManager: mr.manager,
-    month,
-    locations: [
-      { date: isoDate(-1), area: TERRITORIES[i % TERRITORIES.length].city, town: TERRITORIES[i % TERRITORIES.length].hq, purpose: "Regular Coverage" },
-      { date: isoDate(-2), area: TERRITORIES[(i + 1) % TERRITORIES.length].city, town: TERRITORIES[(i + 1) % TERRITORIES.length].hq, purpose: "Joint Work" }
-    ],
-    status: i === 0 ? "APPROVED" : i === 1 ? "SUBMITTED" : "SUBMITTED",
-    gstBranchCode: BRANCHES[i % BRANCHES.length].gst,
-    gstBranchName: BRANCHES[i % BRANCHES.length].name
-  }));
-  // pad up to N with a couple of extra months for the same MRs, if fewer than N MRs exist
-  while (docs.length < N) {
-    const i = docs.length;
-    const mr = mrs[i % mrs.length];
-    docs.push({
+
+  // BUG FIXED: the previous version computed a padded tpId with
+  // `Math.ceil((i+1)/mrs.length)+1`, which SKIPPED sequence "002" for the
+  // first MR and jumped straight to "003". That gap meant the real
+  // nextTourPlanId() logic in utils/tour-plan-id.ts (at the time, based on
+  // countDocuments) would later regenerate the exact same "003" the MR
+  // tries to submit for real, causing a permanent E11000 duplicate-key error
+  // on first use. Sequence numbers per employee+month must always be
+  // strictly sequential with no gaps — tracked here with a running counter
+  // per employee code instead of a derived formula. Statuses also now match
+  // what the real workflow actually produces (SUBMITTED/APPROVED/REJECTED/
+  // VOIDED) — "DRAFT" is never set by the live submit flow, so seeding it
+  // just left dead rows Managers could never act on.
+  const nextSeq = new Map<string, number>();
+  function seq(employeeCode: string) {
+    const n = (nextSeq.get(employeeCode) ?? 0) + 1;
+    nextSeq.set(employeeCode, n);
+    return String(n).padStart(3, "0");
+  }
+  function makeTp(mr: (typeof EMPLOYEES)[number], i: number, overrides: Partial<{
+    status: string; assignedManager: string | null; parentTpId: string; reassignedToTpId: string;
+    voidedBy: string; voidedAt: Date; voidReason: string; rejectReason: string; approvedBy: string; approvedAt: Date;
+  }> = {}) {
+    const tpId = `TP-${month}-${mr.code}-${seq(mr.code)}`;
+    return {
       tenantSlug: TENANT,
-      tpId: `TP-${month}-${mr.code}-00${Math.ceil((i + 1) / mrs.length) + 1}`,
+      tpId,
       employeeCode: mr.code,
       employeeName: mr.name,
       primaryManager: mr.manager,
-      assignedManager: mr.manager,
+      assignedManager: overrides.assignedManager ?? mr.manager,
       month,
-      locations: [{ date: isoDate(-3), area: TERRITORIES[i % TERRITORIES.length].city, town: TERRITORIES[i % TERRITORIES.length].hq, purpose: "Regular Coverage" }],
-      status: "DRAFT",
+      locations: [
+        { date: isoDate(-1 - i), area: TERRITORIES[i % TERRITORIES.length].city, town: TERRITORIES[i % TERRITORIES.length].hq, purpose: "Regular Coverage" },
+        { date: isoDate(-2 - i), area: TERRITORIES[(i + 1) % TERRITORIES.length].city, town: TERRITORIES[(i + 1) % TERRITORIES.length].hq, purpose: "Joint Work" }
+      ],
+      status: overrides.status ?? "SUBMITTED",
       gstBranchCode: BRANCHES[i % BRANCHES.length].gst,
-      gstBranchName: BRANCHES[i % BRANCHES.length].name
-    });
+      gstBranchName: BRANCHES[i % BRANCHES.length].name,
+      parentTpId: overrides.parentTpId,
+      reassignedToTpId: overrides.reassignedToTpId,
+      voidedBy: overrides.voidedBy,
+      voidedAt: overrides.voidedAt,
+      voidReason: overrides.voidReason,
+      rejectReason: overrides.rejectReason,
+      approvedBy: overrides.approvedBy,
+      approvedAt: overrides.approvedAt
+    };
   }
-  await reset(TourPlanModel, { tenantSlug: TENANT }, docs, "TourPlan");
+
+  const docs: ReturnType<typeof makeTp>[] = [];
+
+  // One straightforward TP per MR — first two pre-approved, rest pending
+  // (so the Manager portal has real SUBMITTED rows to approve/reject).
+  mrs.forEach((mr, i) => {
+    docs.push(makeTp(mr, i, i === 0 || i === 1
+      ? { status: "APPROVED", approvedBy: mr.manager ?? undefined, approvedAt: daysAgo(2) }
+      : { status: "SUBMITTED" }));
+  });
+
+  // Cross-manager void + reassign demo (PRD 12.1) — MR-001's TP is voided by
+  // a second manager and replaced with a new linked TP under their chain.
+  const mr001 = mrs.find((m) => m.code === "MR-001") ?? mrs[0];
+  const crossManager = EMPLOYEES.find((e) => e.role === "ABM" && e.code !== mr001.manager)?.code ?? mr001.manager;
+  const voided = makeTp(mr001, 6, {
+    status: "VOIDED", voidedBy: crossManager ?? undefined, voidedAt: daysAgo(1), voidReason: "Accompanying Manager B's team on a joint tour this month"
+  });
+  docs.push(voided);
+  const reassigned = makeTp(mr001, 6, {
+    status: "SUBMITTED", assignedManager: crossManager, parentTpId: voided.tpId
+  });
+  voided.reassignedToTpId = reassigned.tpId;
+  docs.push(reassigned);
+
+  // One rejected TP, for a realistic status mix.
+  const mr002 = mrs.find((m) => m.code !== mr001.code) ?? mrs[1];
+  docs.push(makeTp(mr002, 7, { status: "REJECTED", rejectReason: "Overlaps with last month's uncovered patch — resubmit with corrected route" }));
+
+  // Pad up to exactly N with additional SUBMITTED plans (still strictly
+  // sequential per employee — no gaps).
+  let padIdx = 8;
+  while (docs.length < N) {
+    const mr = mrs[padIdx % mrs.length];
+    docs.push(makeTp(mr, padIdx, { status: "SUBMITTED" }));
+    padIdx++;
+  }
+
+  await reset(TourPlanModel, { tenantSlug: TENANT }, docs.slice(0, N), "TourPlan");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
