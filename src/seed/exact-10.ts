@@ -96,8 +96,16 @@ const EMPLOYEES = [
 const SPECIALTIES = ["Ophthalmologist", "Cardiologist", "General Physician", "ENT Specialist", "Dermatologist", "Pediatrician", "Orthopedic", "Diabetologist", "Neurologist", "Gynaecologist"];
 const QUALIFICATIONS = ["MBBS", "MBBS, MD", "MBBS, MS", "MBBS, DNB", "MBBS, DGO", "MBBS, MD (Ophthal)", "MBBS, MS (ENT)", "MBBS, MD (Derm)", "MBBS, MD (Peds)", "MBBS, MD (Cardio)"];
 
+// Doctor -> MR mapping is round-robin by default, but indices 7 and 8 are
+// pinned to MR-001 instead of their round-robin owners (MR-002/MR-003) so
+// MR-001 has 4 doctors to visit instead of 2 — every other MR still keeps
+// at least one, and the total stays at exactly 10 (no new doctor records,
+// just a different assignment of the same 10).
+const DOCTOR_MR_OVERRIDES: Record<number, string> = { 7: "MR-001", 8: "MR-001" };
+
 const DOCTORS = TERRITORIES.slice(0, N).map((t, i) => {
-  const mr = EMPLOYEES.filter((e) => e.role === "MR" || e.role === "SR_MR")[i % 6];
+  const mrList = EMPLOYEES.filter((e) => e.role === "MR" || e.role === "SR_MR");
+  const mr = DOCTOR_MR_OVERRIDES[i] ? mrList.find((e) => e.code === DOCTOR_MR_OVERRIDES[i])! : mrList[i % 6];
   return {
     code: `DOC-${String(i + 1).padStart(3, "0")}`,
     name: `Dr. ${["Ananya Mehta", "Rajesh Kumar", "Sneha Patil", "Arun Prakash", "Kavita Reddy", "Suresh Nair", "Meera Iyer", "Amit Joshi", "Divya Krishnan", "Rohan Verma"][i]}`,
@@ -432,6 +440,39 @@ async function seedTourPlans() {
   // One rejected TP, for a realistic status mix.
   const mr002 = mrs.find((m) => m.code !== mr001.code) ?? mrs[1];
   docs.push(makeTp(mr002, 7, { status: "REJECTED", rejectReason: "Overlaps with last month's uncovered patch — resubmit with corrected route" }));
+
+  // Forward-looking Tour Plan for MR-001 covering visits to the two doctors
+  // just remapped to them (DOCTOR_MR_OVERRIDES above — Dr. Amit Joshi and
+  // Dr. Divya Krishnan). Filed for NEXT month rather than the current one:
+  // MR-001 already has an active Tour Plan this month (the reassigned pair
+  // above), and the one-active-TP-per-month guard (field.routes.ts /
+  // manager.routes.ts) would reject a second one for the same month.
+  const nextMonthDate = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 1));
+  const nextMonth = `${nextMonthDate.getUTCFullYear()}-${String(nextMonthDate.getUTCMonth() + 1).padStart(2, "0")}`;
+  docs.push({
+    tenantSlug: TENANT,
+    tpId: `TP-${nextMonth}-${mr001.code}-001`,
+    employeeCode: mr001.code,
+    employeeName: mr001.name,
+    primaryManager: mr001.manager,
+    assignedManager: mr001.manager,
+    month: nextMonth,
+    locations: [
+      { date: `${nextMonth}-05`, area: TERRITORIES[1].city, town: TERRITORIES[1].hq, purpose: "Doctor Visit — Dr. Amit Joshi" },
+      { date: `${nextMonth}-12`, area: TERRITORIES[2].city, town: TERRITORIES[2].hq, purpose: "Doctor Visit — Dr. Divya Krishnan" }
+    ],
+    status: "SUBMITTED",
+    gstBranchCode: BRANCHES[0].gst,
+    gstBranchName: BRANCHES[0].name,
+    parentTpId: undefined,
+    reassignedToTpId: undefined,
+    voidedBy: undefined,
+    voidedAt: undefined,
+    voidReason: undefined,
+    rejectReason: undefined,
+    approvedBy: undefined,
+    approvedAt: undefined
+  });
 
   // Pad up to exactly N. Every MR already has exactly one active (DRAFT/
   // SUBMITTED/APPROVED) Tour Plan at this point from the loops above — a
