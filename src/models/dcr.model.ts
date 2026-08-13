@@ -9,7 +9,11 @@ const sampleSchema = new Schema(
     productName:  { type: String, required: true },
     productCode:  { type: String, default: null },
     qty:          { type: Number, required: true, default: 0, min: 0 },
-    batchNumber:  { type: String, default: null }
+    batchNumber:  { type: String, default: null },
+    // Zivira_Project_Basic.docx Topic 1 — "Product Priority" under Product
+    // Promotion. Per-product, not per-visit — an MR may discuss 3 products
+    // in one call with different emphasis on each.
+    priority:     { type: String, enum: ["HIGH", "MEDIUM", "LOW"], default: null }
   },
   { _id: false }
 );
@@ -52,6 +56,26 @@ const dcrSchema = new Schema(
       jointWorkType:       { type: String, enum: ["FIELD_WORK", "ON_JOB_TRAINING", "PERFORMANCE_REVIEW"], default: "FIELD_WORK" },
       managerObservations: { type: String }
     },
+    // ── Zivira_Project_Basic.docx Topic 1 — DCR Management Module ──────
+    // "Visit Information": check-in/out, GPS, hospital/clinic, duration.
+    checkInTime:      { type: String, default: null },   // "HH:MM"
+    checkOutTime:      { type: String, default: null },
+    gpsLocation: {
+      latitude:  { type: Number, default: null },
+      longitude: { type: Number, default: null },
+      label:     { type: String, default: null }
+    },
+    hospitalClinic:    { type: String, default: null },
+    visitDurationMinutes: { type: Number, default: null, min: 0 },
+    // "Product Promotion": materials/visual aids beyond samples/gifts.
+    promotionalMaterialsShared: { type: [String], default: [] },
+    visualAidUsed:      { type: Boolean, default: false },
+    // "Doctor Feedback": beyond the free-text notes field.
+    prescriptionInterest: { type: String, enum: ["HIGH", "MEDIUM", "LOW", "NONE"], default: null },
+    productFeedback:    { type: String, default: null },
+    competitorMentioned: { type: String, default: null },
+    followUpRequired:   { type: Boolean, default: false },
+    followUpDate:        { type: Date, default: null },
     // ── PRD 12.2 — MR-to-Doctor Visit Tracking (3 visits/month soft cap) ──
     // Soft warning only — the DCR still saves even when overVisitFlag=true.
     overVisitFlag:   { type: Boolean, default: false },

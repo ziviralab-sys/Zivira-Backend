@@ -33,6 +33,17 @@ import { TourPlanModel } from "../models/tour-plan.model.js";
 import { ExpenseClaimModel } from "../models/expense-claim.model.js";
 import { enrichTourPlansWithNames } from "../utils/enrich-tour-plans.js";
 import { enrichWithEmployeeNames } from "../utils/enrich-employee-names.js";
+import { computeComplianceRows } from "../utils/compliance.js";
+import { syncPayrollStatuses } from "../utils/payroll.js";
+import { PayrollStatusModel } from "../models/payroll-status.model.js";
+import { computeRepAnalysisRows, computeManagerJointWorkRows } from "../utils/rep-manager-analysis.js";
+import { DoctorVisitExceptionModel } from "../models/doctor-visit-exception.model.js";
+import { computeProductExposureRows } from "../utils/product-analytics.js";
+import { SampleAllocationModel } from "../models/sample-allocation.model.js";
+import { createSampleAllocationWithRetry } from "../utils/sample-allocation-id.js";
+import { computeSampleDistribution } from "../utils/sample-distribution.js";
+import { computeKpiEngine } from "../utils/kpi-engine.js";
+import { computeAlerts } from "../utils/alerts-engine.js";
 import { CompanyConfigModel, DEFAULT_CONFIG, getConfigValue } from "../models/company-config.model.js";
 
 // Case-insensitive exact match, so "division" filters agree regardless of how a value
@@ -1146,6 +1157,222 @@ companyRouter.get("/visit-summary", asyncHandler(async (req, res) => {
 }));
 
 // ══════════════════════════════════════════════════════════════════════
+// Zivira_Project_Basic.docx Topic 2 — Attendance & Compliance Analytics
+// Topic 4 — Chronic Defaulter Detection (tenant-wide)
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get("/analytics/compliance", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const month = typeof req.query.month === "string" && req.query.month ? req.query.month : undefined;
+
+  const employees = await EmployeeModel.find(
+    { tenantSlug, status: "ACTIVE" },
+    { employeeCode: 1, name: 1, joinDate: 1, role: 1, reportingManager: 1 }
+  ).lean();
+
+  const rows = await computeComplianceRows(tenantSlug, employees, { month });
+  const roleByCode = new Map(employees.map(e => [e.employeeCode, e.role]));
+  const enriched = rows.map(r => ({ ...r, role: roleByCode.get(r.employeeCode) }));
+
+  res.json({
+    data: enriched,
+    month: month ?? "current",
+    summary: {
+      submittedToday: enriched.filter(r => r.submittedToday).length,
+      pendingDCR: enriched.filter(r => r.pendingDCR).length,
+      missedYesterday: enriched.filter(r => r.missedYesterday).length,
+      chronicDefaulters: enriched.filter(r => r.chronicDefaulter).length,
+      avgCompliancePercent: enriched.length ? Math.round(enriched.reduce((s, r) => s + r.compliancePercent, 0) / enriched.length) : 100
+    }
+  });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Zivira_Project_Basic.docx Topic 3 — Salary Integration Engine (tenant-wide)
+// Workflow: Employee → No DCR → HR Notification → Employee Explanation →
+// Manager Approval → Payroll Released. Admin can also force-release
+// (e.g. after resolving something outside the app).
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get("/analytics/payroll", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const now = new Date();
+  const month = typeof req.query.month === "string" && req.query.month
+    ? req.query.month
+    : `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+
+  const employees = await EmployeeModel.find(
+    { tenantSlug, status: "ACTIVE" },
+    { employeeCode: 1, name: 1, joinDate: 1, role: 1 }
+  ).lean();
+
+  const records = await syncPayrollStatuses(tenantSlug, employees, month);
+  const nameByCode = new Map(employees.map(e => [e.employeeCode, e.name]));
+  const roleByCode = new Map(employees.map(e => [e.employeeCode, e.role]));
+
+  const data: Array<Record<string, unknown>> = records.map(r => {
+    const serialized: Record<string, unknown> = serializeDocument(r);
+    serialized.employeeName = nameByCode.get(r.employeeCode);
+    serialized.role = roleByCode.get(r.employeeCode);
+    return serialized;
+  });
+
+  res.json({
+    data, month,
+    summary: {
+      onHold: data.filter(r => r.status === "HOLD").length,
+      pendingApproval: data.filter(r => r.status === "EXPLANATION_SUBMITTED").length,
+      released: data.filter(r => r.status === "RELEASED").length
+    }
+  });
+}));
+
+companyRouter.patch("/analytics/payroll/:id/release", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const record = await PayrollStatusModel.findOne({ tenantSlug, _id: req.params.id });
+  if (!record) throw new HttpError(404, "Payroll status record not found");
+
+  record.status = "RELEASED";
+  record.managerApprovedBy = "ADMIN_OVERRIDE";
+  record.managerApprovedByName = "Admin (override)";
+  record.managerApprovedAt = new Date();
+  record.releasedAt = new Date();
+  await record.save();
+
+  await audit("COMPANY_PAYROLL_RELEASED", "PayrollStatus", String(record._id), { tenantSlug, employeeCode: record.employeeCode, month: record.month });
+  res.json({ data: serializeDocument(record) });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Zivira_Project_Basic.docx Topic 5 — Representative vs Manager Analysis
+// Topic 6 — Joint Field Work Analysis (tenant-wide)
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get("/analytics/rep-manager", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const now = new Date();
+  const month = typeof req.query.month === "string" && req.query.month
+    ? req.query.month
+    : `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+
+  const employees = await EmployeeModel.find(
+    { tenantSlug, status: "ACTIVE", role: { $in: ["MR", "SR_MR"] } },
+    { employeeCode: 1, name: 1, reportingManager: 1 }
+  ).lean();
+
+  const managers = await EmployeeModel.find(
+    { tenantSlug, status: "ACTIVE", role: { $in: ["ABM", "RBM", "ZBM", "NBH", "BH"] } },
+    { employeeCode: 1, name: 1 }
+  ).lean();
+  const managerNameByCode = new Map(managers.map(m => [m.employeeCode, m.name]));
+
+  const reps = await computeRepAnalysisRows(tenantSlug, employees, month);
+  const repsEnriched = reps.map(r => ({ ...r, reportingManagerName: r.reportingManager ? managerNameByCode.get(r.reportingManager) : undefined }));
+  const managerRows = computeManagerJointWorkRows(reps, managerNameByCode);
+
+  res.json({ data: repsEnriched, managers: managerRows, month });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Zivira_Project_Basic.docx Topic 9 — Product Exposure Analytics
+// Topic 10 — Product-wise Performance Dashboard
+// Topic 12 — Sample vs Doctor Input Analysis (prescription-interest ROI proxy)
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get("/analytics/product-exposure", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const month = typeof req.query.month === "string" && req.query.month ? req.query.month : undefined;
+  const rows = await computeProductExposureRows(tenantSlug, month);
+  res.json({ data: rows, month: month ?? "all" });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Zivira_Project_Basic.docx Topic 11 — Sample Distribution Analytics
+// ══════════════════════════════════════════════════════════════════════
+const sampleAllocationSchema = z.object({
+  employeeCode: z.string().min(1),
+  productCode: z.string().min(1),
+  productName: z.string().min(1),
+  batchNumber: z.string().optional(),
+  qtyIssued: z.number().min(1),
+  month: z.string().optional(),
+  notes: z.string().optional()
+});
+
+companyRouter.post("/sample-allocations", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const body = sampleAllocationSchema.parse(req.body);
+  const now = new Date();
+  const month = body.month ?? `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+
+  const employee = await EmployeeModel.findOne({ tenantSlug, employeeCode: body.employeeCode.toUpperCase() });
+  if (!employee) throw new HttpError(404, "Employee not found");
+
+  const allocation = await createSampleAllocationWithRetry(tenantSlug, body.employeeCode.toUpperCase(), month, (allocationId) =>
+    SampleAllocationModel.create({
+      tenantSlug, allocationId, employeeCode: body.employeeCode.toUpperCase(),
+      productCode: body.productCode, productName: body.productName, batchNumber: body.batchNumber ?? null,
+      qtyIssued: body.qtyIssued, month, notes: body.notes ?? null
+    })
+  );
+
+  await audit("COMPANY_SAMPLE_ALLOCATION_ISSUED", "SampleAllocation", String(allocation._id), { tenantSlug, employeeCode: body.employeeCode, productCode: body.productCode, qtyIssued: body.qtyIssued, month });
+  res.status(201).json({ data: serializeDocument(allocation) });
+}));
+
+companyRouter.get("/sample-allocations", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const month = typeof req.query.month === "string" && req.query.month ? req.query.month : undefined;
+  const query: Record<string, unknown> = { tenantSlug };
+  if (month) query.month = month;
+  const allocations = await SampleAllocationModel.find(query).sort({ createdAt: -1 }).limit(200);
+  res.json({ data: await enrichWithEmployeeNames(tenantSlug, allocations.map(serializeDocument), ["employeeCode"]) });
+}));
+
+companyRouter.get("/analytics/sample-distribution", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const month = typeof req.query.month === "string" && req.query.month ? req.query.month : undefined;
+  const report = await computeSampleDistribution(tenantSlug, month);
+  res.json({ ...report, month: month ?? "all" });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Zivira_Project_Basic.docx Topic 14 — KPI Engine
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get("/analytics/kpi", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const now = new Date();
+  const month = typeof req.query.month === "string" && req.query.month
+    ? req.query.month
+    : `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+
+  const employees = await EmployeeModel.find(
+    { tenantSlug, status: "ACTIVE" },
+    { employeeCode: 1, name: 1, reportingManager: 1, joinDate: 1 }
+  ).lean();
+
+  const { repKpis, managerKpis } = await computeKpiEngine(tenantSlug, employees, month);
+  res.json({ reps: repKpis, managers: managerKpis, month });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Zivira_Project_Basic.docx Topic 15 — Alert & Notification Engine
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get("/analytics/alerts", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const now = new Date();
+  const month = typeof req.query.month === "string" && req.query.month
+    ? req.query.month
+    : `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+
+  const alerts = await computeAlerts(tenantSlug, month);
+  res.json({
+    data: alerts, month,
+    summary: {
+      high: alerts.filter(a => a.severity === "HIGH").length,
+      medium: alerts.filter(a => a.severity === "MEDIUM").length,
+      low: alerts.filter(a => a.severity === "LOW").length
+    }
+  });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
 // PRD Section 12.3A — Drug Summary (samples given, per product, per doctor)
 // ══════════════════════════════════════════════════════════════════════
 companyRouter.get("/drug-summary", asyncHandler(async (req, res) => {
@@ -1213,7 +1440,7 @@ companyRouter.get("/doctor-coverage", asyncHandler(async (req, res) => {
   const match: Record<string, unknown> = { tenantSlug, status: { $ne: "REJECTED" } };
   if (month) match.month = month;
 
-  const [visitRows, sampleRows, giftRows, doctors] = await Promise.all([
+  const [visitRows, sampleRows, giftRows, doctors, allTimeLastVisitRows, latestExceptions] = await Promise.all([
     DcrModel.aggregate([
       { $match: match },
       { $group: { _id: "$doctorId", visitCount: { $sum: 1 }, lastVisitDate: { $max: "$visitDate" } } }
@@ -1230,19 +1457,45 @@ companyRouter.get("/doctor-coverage", asyncHandler(async (req, res) => {
       { $match: { inputsGiven: { $ne: null } } },
       { $group: { _id: "$doctorId", totalGifts: { $sum: "$inputsGiven.qty" }, totalGiftValue: { $sum: { $ifNull: ["$inputsGiven.valueRs", 0] } } } }
     ]),
-    DoctorModel.find({ tenantSlug, status: "ACTIVE" }).lean()
+    DoctorModel.find({ tenantSlug, status: "ACTIVE" }).lean(),
+    // Zivira_Project_Basic.docx Topic 7 — Territory Coverage Analytics needs
+    // the doctor's TRUE last visit across all time, not scoped to the
+    // ?month filter above (which only powers the existing sample/gift MIS).
+    DcrModel.aggregate([
+      { $match: { tenantSlug, status: { $ne: "REJECTED" } } },
+      { $group: { _id: "$doctorId", lastVisitDate: { $max: "$visitDate" } } }
+    ]),
+    // Topic 8 — most recent logged exception per doctor, so an unvisited
+    // doctor with a documented reason doesn't read as unexplained neglect.
+    DoctorVisitExceptionModel.aggregate([
+      { $match: { tenantSlug } },
+      { $sort: { createdAt: -1 } },
+      { $group: { _id: "$doctorId", reason: { $first: "$reason" }, notes: { $first: "$notes" }, month: { $first: "$month" } } }
+    ])
   ]);
 
   const visitMap = new Map(visitRows.map((r) => [String(r._id), r]));
   const sampleMap = new Map(sampleRows.map((r) => [String(r._id), r.totalSamples]));
   const giftMap = new Map(giftRows.map((r) => [String(r._id), r]));
+  const allTimeLastVisitMap = new Map(allTimeLastVisitRows.map((r) => [String(r._id), r.lastVisitDate as Date]));
+  const exceptionMap = new Map(latestExceptions.map((e) => [String(e._id), e]));
   const thresholdRaw = await getConfigValue(tenantSlug, "GIFT_VALUE_THRESHOLD_RS");
   const threshold = typeof thresholdRaw === "number" ? thresholdRaw : Number(DEFAULT_CONFIG.GIFT_VALUE_THRESHOLD_RS);
+  const now = Date.now();
 
   const data = doctors.map((doctor) => {
     const id = String(doctor._id);
     const visit = visitMap.get(id);
     const gift = giftMap.get(id);
+    const lastVisitEver = allTimeLastVisitMap.get(id) ?? null;
+    const daysSinceLastVisit = lastVisitEver ? Math.floor((now - new Date(lastVisitEver).getTime()) / 86400000) : null;
+    const alertBucket =
+      daysSinceLastVisit === null ? "NEVER_VISITED" :
+      daysSinceLastVisit >= 180 ? "180" :
+      daysSinceLastVisit >= 90 ? "90" :
+      daysSinceLastVisit >= 60 ? "60" :
+      daysSinceLastVisit >= 30 ? "30" : null;
+    const exception = exceptionMap.get(id);
     return {
       doctorId: id,
       doctorName: doctor.name,
@@ -1254,7 +1507,15 @@ companyRouter.get("/doctor-coverage", asyncHandler(async (req, res) => {
       totalSamples: sampleMap.get(id) ?? 0,
       totalGifts: gift?.totalGifts ?? 0,
       totalGiftValueRs: gift?.totalGiftValue ?? 0,
-      overGiftThreshold: (gift?.totalGiftValue ?? 0) > threshold
+      overGiftThreshold: (gift?.totalGiftValue ?? 0) > threshold,
+      // Topic 7 — Territory Coverage Analytics
+      lastVisitDateEver: lastVisitEver,
+      daysSinceLastVisit,
+      alertBucket,
+      // Topic 8 — Doctor Exception Management
+      exceptionReason: exception?.reason ?? null,
+      exceptionNotes: exception?.notes ?? null,
+      exceptionMonth: exception?.month ?? null
     };
   });
 

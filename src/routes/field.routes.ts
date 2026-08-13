@@ -18,6 +18,9 @@ import { createTourPlanWithRetry } from "../utils/tour-plan-id.js";
 import { createExpenseClaimWithRetry } from "../utils/expense-claim-id.js";
 import { enrichTourPlansWithNames } from "../utils/enrich-tour-plans.js";
 import { enrichWithEmployeeNames } from "../utils/enrich-employee-names.js";
+import { syncPayrollStatuses } from "../utils/payroll.js";
+import { PayrollStatusModel } from "../models/payroll-status.model.js";
+import { DoctorVisitExceptionModel, DOCTOR_EXCEPTION_REASONS } from "../models/doctor-visit-exception.model.js";
 
 // PRD 12.3B — fixed gift/input item-type list for the compliance-tracked
 // picker (Pen, Calendar, Notepad, Literature, ...). Kept as a constant so
@@ -39,7 +42,8 @@ const dcrSchema = z.object({
     productName:  z.string(),
     productCode:  z.string().optional(),
     qty:          z.number().min(0),
-    batchNumber:  z.string().optional()
+    batchNumber:  z.string().optional(),
+    priority:     z.enum(["HIGH", "MEDIUM", "LOW"]).optional()
   })).default([]),
   inputsGiven: z.array(z.object({
     inputName: z.string(),
@@ -52,7 +56,27 @@ const dcrSchema = z.object({
     jointWorkType:        z.enum(["FIELD_WORK", "ON_JOB_TRAINING", "PERFORMANCE_REVIEW"]).optional(),
     managerObservations:  z.string().optional()
   }).optional(),
-  overrideOverVisitWarning: z.boolean().optional() // MR clicked "Confirm" on the 4th-visit modal
+  overrideOverVisitWarning: z.boolean().optional(), // MR clicked "Confirm" on the 4th-visit modal
+
+  // ── Zivira_Project_Basic.docx Topic 1 — Visit Information / Product
+  // Promotion / Doctor Feedback (all optional — DCR still saves without
+  // them, same soft-capture philosophy as everything else on this form) ──
+  checkInTime:      z.string().optional(),
+  checkOutTime:      z.string().optional(),
+  gpsLocation: z.object({
+    latitude:  z.number().optional(),
+    longitude: z.number().optional(),
+    label:     z.string().optional()
+  }).optional(),
+  hospitalClinic:    z.string().optional(),
+  visitDurationMinutes: z.number().min(0).optional(),
+  promotionalMaterialsShared: z.array(z.string()).default([]),
+  visualAidUsed:      z.boolean().optional(),
+  prescriptionInterest: z.enum(["HIGH", "MEDIUM", "LOW", "NONE"]).optional(),
+  productFeedback:    z.string().optional(),
+  competitorMentioned: z.string().optional(),
+  followUpRequired:   z.boolean().optional(),
+  followUpDate:        z.string().optional()
 });
 
 function currentUtcMonth() {
@@ -153,6 +177,18 @@ fieldRouter.post("/dcrs", asyncHandler(async (req, res) => {
     samplesGiven: body.samplesGiven,
     inputsGiven: body.inputsGiven,
     jointWork: body.jointWork,
+    checkInTime: body.checkInTime,
+    checkOutTime: body.checkOutTime,
+    gpsLocation: body.gpsLocation,
+    hospitalClinic: body.hospitalClinic,
+    visitDurationMinutes: body.visitDurationMinutes,
+    promotionalMaterialsShared: body.promotionalMaterialsShared,
+    visualAidUsed: body.visualAidUsed,
+    prescriptionInterest: body.prescriptionInterest,
+    productFeedback: body.productFeedback,
+    competitorMentioned: body.competitorMentioned,
+    followUpRequired: body.followUpRequired,
+    followUpDate: body.followUpDate ? new Date(body.followUpDate) : undefined,
     visitDate: new Date(),
     month,
     overVisitFlag,
@@ -209,7 +245,64 @@ fieldRouter.get("/unvisited-doctors", asyncHandler(async (req, res) => {
   const visitedIdSet = new Set(visitedIds.map((id) => String(id)));
   const unvisited = myDoctors.filter((d) => !visitedIdSet.has(String(d._id)));
 
-  res.json({ data: unvisited.map(serializeDocument), month });
+  // Zivira_Project_Basic.docx Topic 8 — surface any exception already
+  // logged this month so the UI doesn't prompt for a reason twice.
+  const exceptions = await DoctorVisitExceptionModel.find({
+    tenantSlug, employeeCode: employee.employeeCode, month,
+    doctorId: { $in: unvisited.map((d) => d._id) }
+  }).lean();
+  const exceptionByDoctorId = new Map(exceptions.map((e) => [String(e.doctorId), e]));
+
+  const data = unvisited.map((d) => {
+    const serialized = serializeDocument(d) as Record<string, unknown>;
+    const exception = exceptionByDoctorId.get(String(d._id));
+    serialized.exceptionReason = exception?.reason ?? null;
+    serialized.exceptionNotes = exception?.notes ?? null;
+    return serialized;
+  });
+
+  res.json({ data, month });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Zivira_Project_Basic.docx Topic 8 — Doctor Exception Management
+// ══════════════════════════════════════════════════════════════════════
+fieldRouter.get("/exception-reasons", asyncHandler(async (_req, res) => {
+  res.json({ data: DOCTOR_EXCEPTION_REASONS });
+}));
+
+const doctorExceptionSchema = z.object({
+  doctorId: z.string(),
+  month: z.string().optional(),
+  reason: z.enum(DOCTOR_EXCEPTION_REASONS),
+  notes: z.string().optional()
+});
+
+fieldRouter.post("/doctor-exceptions", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const employee = await getFieldProfile(req.auth!.sub);
+  const body = doctorExceptionSchema.parse(req.body);
+  const month = body.month ?? currentUtcMonth();
+
+  const doctor = await DoctorModel.findOne({ tenantSlug, _id: body.doctorId, mappedEmployeeCode: employee.employeeCode });
+  if (!doctor) throw new HttpError(404, "Doctor not found in your territory");
+
+  const record = await DoctorVisitExceptionModel.findOneAndUpdate(
+    { tenantSlug, doctorId: body.doctorId, employeeCode: employee.employeeCode, month },
+    { tenantSlug, doctorId: body.doctorId, employeeCode: employee.employeeCode, month, reason: body.reason, notes: body.notes ?? null },
+    { upsert: true, new: true }
+  );
+
+  await audit("FIELD_DOCTOR_EXCEPTION_LOGGED", "DoctorVisitException", String(record._id), { tenantSlug, employeeCode: employee.employeeCode, doctorId: body.doctorId, month, reason: body.reason });
+  res.status(201).json({ data: serializeDocument(record) });
+}));
+
+fieldRouter.get("/doctor-exceptions", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const employee = await getFieldProfile(req.auth!.sub);
+  const month = typeof req.query.month === "string" && req.query.month ? req.query.month : currentUtcMonth();
+  const exceptions = await DoctorVisitExceptionModel.find({ tenantSlug, employeeCode: employee.employeeCode, month }).sort({ createdAt: -1 });
+  res.json({ data: exceptions.map(serializeDocument), month });
 }));
 
 // ── PRD 12.3A — product picker for the samples-distributed form (no free text) ──
@@ -441,4 +534,41 @@ fieldRouter.post("/attendance/check-out", asyncHandler(async (req, res) => {
     { new: true }
   );
   res.status(200).json({ data: attendance ? serializeDocument(attendance) : null });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Zivira_Project_Basic.docx Topic 3 — Salary Integration Engine (self view)
+// Workflow: Employee → No DCR → HR Notification → Employee Explanation →
+// Manager Approval → Payroll Released.
+// ══════════════════════════════════════════════════════════════════════
+fieldRouter.get("/payroll-status", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const employee = await getFieldProfile(req.auth!.sub);
+  const now = new Date();
+  const month = typeof req.query.month === "string" && req.query.month
+    ? req.query.month
+    : `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+
+  const [record] = await syncPayrollStatuses(tenantSlug, [{ employeeCode: employee.employeeCode, name: employee.name, joinDate: employee.joinDate }], month);
+  res.json({ data: record ? serializeDocument(record) : null, month });
+}));
+
+const payrollExplanationSchema = z.object({ explanation: z.string().min(5, "Please explain why DCRs were missed (min 5 characters)") });
+
+fieldRouter.patch("/payroll-status/:id/explanation", asyncHandler(async (req, res) => {
+  const tenantSlug = req.auth!.tenantSlug!;
+  const employee = await getFieldProfile(req.auth!.sub);
+  const body = payrollExplanationSchema.parse(req.body);
+
+  const record = await PayrollStatusModel.findOne({ tenantSlug, _id: req.params.id, employeeCode: employee.employeeCode });
+  if (!record) throw new HttpError(404, "Payroll status record not found");
+  if (record.status !== "HOLD") throw new HttpError(400, `This record is ${record.status.toLowerCase().replace("_", " ")} — nothing to explain right now.`);
+
+  record.employeeExplanation = body.explanation;
+  record.explanationSubmittedAt = new Date();
+  record.status = "EXPLANATION_SUBMITTED";
+  await record.save();
+
+  await audit("FIELD_PAYROLL_EXPLANATION_SUBMITTED", "PayrollStatus", String(record._id), { tenantSlug, employeeCode: employee.employeeCode, month: record.month });
+  res.json({ data: serializeDocument(record) });
 }));

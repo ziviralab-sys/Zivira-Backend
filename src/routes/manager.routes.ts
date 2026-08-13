@@ -16,6 +16,10 @@ import { createTourPlanWithRetry } from "../utils/tour-plan-id.js";
 import { notifyManager } from "../utils/notify.js";
 import { enrichTourPlansWithNames } from "../utils/enrich-tour-plans.js";
 import { enrichWithEmployeeNames } from "../utils/enrich-employee-names.js";
+import { computeComplianceRows } from "../utils/compliance.js";
+import { syncPayrollStatuses } from "../utils/payroll.js";
+import { PayrollStatusModel } from "../models/payroll-status.model.js";
+import { computeRepAnalysisRows } from "../utils/rep-manager-analysis.js";
 
 export const managerRouter = Router();
 managerRouter.use(requireAuth);
@@ -429,4 +433,143 @@ managerRouter.get("/visit-coverage", asyncHandler(async (req, res) => {
   }));
 
   res.json({ data: { month, mrs: team.map((e) => ({ employeeCode: e.employeeCode, name: e.name })), rows } });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Zivira_Project_Basic.docx Topic 2 — Attendance & Compliance Analytics
+// Topic 4 — Chronic Defaulter Detection (team-scoped)
+// ══════════════════════════════════════════════════════════════════════
+managerRouter.get("/analytics/compliance", asyncHandler(async (req, res) => {
+  const mgr = await getManagerProfile(req.auth!.sub);
+  const month = typeof req.query.month === "string" && req.query.month ? req.query.month : undefined;
+
+  const team = await EmployeeModel.find(
+    { tenantSlug: mgr.tenantSlug, reportingManager: mgr.employeeCode, status: "ACTIVE" },
+    { employeeCode: 1, name: 1, joinDate: 1, role: 1 }
+  ).lean();
+
+  const rows = await computeComplianceRows(mgr.tenantSlug, team, { month });
+  const roleByCode = new Map(team.map(e => [e.employeeCode, e.role]));
+  const enriched = rows.map(r => ({ ...r, role: roleByCode.get(r.employeeCode) }));
+
+  res.json({
+    data: enriched,
+    month: month ?? "current",
+    summary: {
+      submittedToday: enriched.filter(r => r.submittedToday).length,
+      pendingDCR: enriched.filter(r => r.pendingDCR).length,
+      missedYesterday: enriched.filter(r => r.missedYesterday).length,
+      chronicDefaulters: enriched.filter(r => r.chronicDefaulter).length,
+      avgCompliancePercent: enriched.length ? Math.round(enriched.reduce((s, r) => s + r.compliancePercent, 0) / enriched.length) : 100
+    }
+  });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Zivira_Project_Basic.docx Topic 3 — Salary Integration Engine (team-scoped)
+// Workflow: Employee → No DCR → HR Notification → Employee Explanation →
+// Manager Approval → Payroll Released.
+// ══════════════════════════════════════════════════════════════════════
+managerRouter.get("/analytics/payroll", asyncHandler(async (req, res) => {
+  const mgr = await getManagerProfile(req.auth!.sub);
+  const now = new Date();
+  const month = typeof req.query.month === "string" && req.query.month
+    ? req.query.month
+    : `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+
+  const team = await EmployeeModel.find(
+    { tenantSlug: mgr.tenantSlug, reportingManager: mgr.employeeCode, status: "ACTIVE" },
+    { employeeCode: 1, name: 1, joinDate: 1, role: 1 }
+  ).lean();
+
+  const records = await syncPayrollStatuses(mgr.tenantSlug, team, month);
+  const nameByCode = new Map(team.map(e => [e.employeeCode, e.name]));
+  const roleByCode = new Map(team.map(e => [e.employeeCode, e.role]));
+
+  const data: Array<Record<string, unknown>> = records.map(r => {
+    const serialized: Record<string, unknown> = serializeDocument(r);
+    serialized.employeeName = nameByCode.get(r.employeeCode);
+    serialized.role = roleByCode.get(r.employeeCode);
+    return serialized;
+  });
+
+  res.json({
+    data, month,
+    summary: {
+      onHold: data.filter(r => r.status === "HOLD").length,
+      pendingApproval: data.filter(r => r.status === "EXPLANATION_SUBMITTED").length,
+      released: data.filter(r => r.status === "RELEASED").length
+    }
+  });
+}));
+
+managerRouter.patch("/analytics/payroll/:id/approve", asyncHandler(async (req, res) => {
+  const mgr = await getManagerProfile(req.auth!.sub);
+  const record = await PayrollStatusModel.findOne({
+    tenantSlug: mgr.tenantSlug, _id: req.params.id, employeeCode: { $in: (
+      await EmployeeModel.find({ tenantSlug: mgr.tenantSlug, reportingManager: mgr.employeeCode }, { employeeCode: 1 }).lean()
+    ).map(e => e.employeeCode) }
+  });
+  if (!record) throw new HttpError(404, "Payroll status record not found for your team");
+
+  record.status = "RELEASED";
+  record.managerApprovedBy = mgr.employeeCode;
+  record.managerApprovedByName = mgr.name;
+  record.managerApprovedAt = new Date();
+  record.releasedAt = new Date();
+  await record.save();
+
+  await audit("MANAGER_PAYROLL_APPROVED", "PayrollStatus", String(record._id), { tenantSlug: mgr.tenantSlug, employeeCode: record.employeeCode, month: record.month, approvedBy: mgr.employeeCode });
+  res.json({ data: serializeDocument(record) });
+}));
+
+const payrollRejectSchema = z.object({ reason: z.string().min(1, "A reason is required so the employee knows what to address") });
+
+managerRouter.patch("/analytics/payroll/:id/reject", asyncHandler(async (req, res) => {
+  const mgr = await getManagerProfile(req.auth!.sub);
+  const body = payrollRejectSchema.parse(req.body);
+  const teamCodes = (await EmployeeModel.find({ tenantSlug: mgr.tenantSlug, reportingManager: mgr.employeeCode }, { employeeCode: 1 }).lean()).map(e => e.employeeCode);
+  const record = await PayrollStatusModel.findOne({ tenantSlug: mgr.tenantSlug, _id: req.params.id, employeeCode: { $in: teamCodes } });
+  if (!record) throw new HttpError(404, "Payroll status record not found for your team");
+
+  record.status = "HOLD";
+  record.holdReason = `Manager sent back: ${body.reason}`;
+  record.employeeExplanation = null;
+  record.explanationSubmittedAt = null;
+  await record.save();
+
+  await audit("MANAGER_PAYROLL_REJECTED", "PayrollStatus", String(record._id), { tenantSlug: mgr.tenantSlug, employeeCode: record.employeeCode, month: record.month, reason: body.reason });
+  res.json({ data: serializeDocument(record) });
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Zivira_Project_Basic.docx Topic 5 — Representative vs Manager Analysis
+// Topic 6 — Joint Field Work Analysis (team-scoped: this manager's own
+// doctors-visited vs joint-visit support level, per rep)
+// ══════════════════════════════════════════════════════════════════════
+managerRouter.get("/analytics/rep-manager", asyncHandler(async (req, res) => {
+  const mgr = await getManagerProfile(req.auth!.sub);
+  const now = new Date();
+  const month = typeof req.query.month === "string" && req.query.month
+    ? req.query.month
+    : `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+
+  const team = await EmployeeModel.find(
+    { tenantSlug: mgr.tenantSlug, reportingManager: mgr.employeeCode, status: "ACTIVE" },
+    { employeeCode: 1, name: 1, reportingManager: 1 }
+  ).lean();
+
+  const reps = await computeRepAnalysisRows(mgr.tenantSlug, team, month);
+  const teamJointVisits = reps.reduce((s, r) => s + r.jointVisits, 0);
+  const teamVisits = reps.reduce((s, r) => s + r.totalVisits, 0);
+
+  res.json({
+    data: reps, month,
+    teamSummary: {
+      teamSize: reps.length,
+      totalJointCalls: teamJointVisits,
+      avgJointCallsPerRep: reps.length ? Math.round((teamJointVisits / reps.length) * 10) / 10 : 0,
+      jointCallPercent: teamVisits > 0 ? Math.round((teamJointVisits / teamVisits) * 100) : 0
+    }
+  });
 }));
