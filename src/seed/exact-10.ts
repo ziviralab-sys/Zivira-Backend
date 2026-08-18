@@ -716,7 +716,7 @@ async function seedIdentityMasters() {
     tenantSlug: TENANT, doctorCode: d.code, doctorName: d.name, qualification: d.qualification, specialty: d.specialty, registrationNumber: `REG-${d.code}`,
     clinicName: `${d.name.replace("Dr. ", "")} Clinic`, address: `${TERRITORIES[d.territoryIdx].city} Medical Complex`, area: "Central Area",
     city: TERRITORIES[d.territoryIdx].city, state: TERRITORIES[d.territoryIdx].state, country: "India", pinCode: `${560000 + d.territoryIdx * 111}`,
-    mobile: d.phone, phone: d.phone, email: d.email, whatsapp: d.phone
+    mobile: d.phone, phone: d.phone, email: d.email, whatsapp: d.phone, status: "Active"
   }));
   cache.set("doctorMaster", doctorMasterRows);
   await getMasterModel("doctorMaster").deleteMany({ tenantSlug: TENANT });
@@ -854,15 +854,22 @@ async function seedIdentityMasters() {
 async function seedSalesAndReportingMasters() {
   console.log("\n── Generic masters registry — Reporting Structure & Sales tabs ──");
 
-  const managers = {
-    bh: EMPLOYEES.find((e) => e.role === "NBH")?.name ?? EMPLOYEES[0].name,
-    zbm: EMPLOYEES.find((e) => e.role === "RBM")?.name ?? EMPLOYEES[1].name,
-    rbm: EMPLOYEES.find((e) => e.role === "RBM")?.name ?? EMPLOYEES[1].name,
-    abm: EMPLOYEES.find((e) => e.role === "ABM")?.name ?? EMPLOYEES[2].name,
-    be: EMPLOYEES.find((e) => e.role === "MR" || e.role === "SR_MR")?.name ?? EMPLOYEES[4].name
-  };
+  // BH is a single company-wide role (there's only one NBH in the demo
+  // roster, which is realistic), but ZBM/RBM/ABM/BE genuinely vary by
+  // territory — cycling through the actual employees in each role instead
+  // of pinning every row to the same one or two names.
+  const bhName = EMPLOYEES.find((e) => e.role === "NBH")?.name ?? EMPLOYEES[0].name;
+  const rbms = EMPLOYEES.filter((e) => e.role === "RBM").length ? EMPLOYEES.filter((e) => e.role === "RBM") : EMPLOYEES;
+  const abms = EMPLOYEES.filter((e) => e.role === "ABM").length ? EMPLOYEES.filter((e) => e.role === "ABM") : EMPLOYEES;
+  const fieldStaff = EMPLOYEES.filter((e) => e.role === "MR" || e.role === "SR_MR");
   const reportingRows = TERRITORIES.map((t, i) => ({
-    tenantSlug: TENANT, division: DIVISIONS_3[i % 3], bh: managers.bh, zbm: managers.zbm, rbm: managers.rbm, abm: managers.abm, be: managers.be, status: "Active"
+    tenantSlug: TENANT, division: DIVISIONS_3[i % 3], zone: t.zone,
+    bh: bhName,
+    zbm: pick(rbms, i).name,
+    rbm: pick(rbms, i + 1).name,
+    abm: pick(abms, i).name,
+    be: pick(fieldStaff, i).name,
+    status: "Active"
   }));
   await getMasterModel("reportingStructure").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("reportingStructure").insertMany(reportingRows);

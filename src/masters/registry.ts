@@ -599,9 +599,13 @@ export const MASTERS: MasterConfig[] = [
   {
     key: "reportingStructure",
     title: "Reporting Structure",
-    keyFields: ["division"],
+    // A division alone isn't unique — there are only 3 divisions but 10
+    // territories/zones, each with its own local reporting chain, so the
+    // natural key pairs Division with Zone.
+    keyFields: ["division", "zone"],
     fields: [
       { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
+      { key: "zone", label: "Zone", sourceMaster: "regionZoneMaster", sourceField: "zoneName" },
       { key: "bh", label: "BH", sourceMaster: "employees", sourceField: "name" },
       { key: "zbm", label: "ZBM", sourceMaster: "employees", sourceField: "name" },
       { key: "rbm", label: "RBM", sourceMaster: "employees", sourceField: "name" },
