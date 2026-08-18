@@ -77,7 +77,8 @@ export const MASTERS: MasterConfig[] = [
       { key: "regionName", label: "Region Name" },
       { key: "regionCode", label: "Region Code" },
       { key: "state", label: "State", options: INDIAN_STATES },
-      { key: "manager", label: "Manager", sourceMaster: "employees", sourceField: "name" }
+      { key: "manager", label: "Manager", sourceMaster: "employees", sourceField: "name" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -92,7 +93,8 @@ export const MASTERS: MasterConfig[] = [
       { key: "metroNonMetro", label: "Metro / Non-Metro", options: ["Metro", "Non-Metro"] },
       { key: "zone", label: "Zone", sourceMaster: "regionZoneMaster", sourceField: "zoneName" },
       { key: "region", label: "Region", sourceMaster: "regionZoneMaster", sourceField: "regionName" },
-      { key: "patchName", label: "Patch Name" }
+      { key: "patchName", label: "Patch Name" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -127,7 +129,8 @@ export const MASTERS: MasterConfig[] = [
       { key: "brandName", label: "Brand Name" },
       { key: "molecule", label: "Molecule", sourceMaster: "moleculeMaster", sourceField: "moleculeName" },
       { key: "therapy", label: "Therapy", sourceMaster: "therapyMaster", sourceField: "therapyName" },
-      { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" }
+      { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -159,7 +162,8 @@ export const MASTERS: MasterConfig[] = [
       { key: "ptr", label: "PTR", type: "number" },
       { key: "pts", label: "PTS", type: "number" },
       { key: "mrp", label: "MRP", type: "number" },
-      { key: "effectiveDate", label: "Effective Date", type: "date" }
+      { key: "effectiveDate", label: "Effective Date", type: "date" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -202,7 +206,22 @@ export const MASTERS: MasterConfig[] = [
         "General Physician", "Pediatrics", "Cardiologist", "Diabetologist", "Pulmonologist",
         "Gastroenterologist", "Dermatologist", "Neurologist", "Nephrologist", "Orthopaedic Surgeon"
       ] },
-      { key: "registrationNumber", label: "Registration Number" }
+      { key: "registrationNumber", label: "Registration Number" },
+      // The Doctor Master screen also displays these columns (joined in from
+      // the Address / Contact Details sub-tabs in the UI) — declared here so
+      // the backend actually persists them instead of silently discarding
+      // whatever the Add form sends, which is why they always showed blank.
+      { key: "clinicName", label: "Clinic Name" },
+      { key: "address", label: "Address" },
+      { key: "area", label: "Area" },
+      { key: "city", label: "City" },
+      { key: "state", label: "State", options: INDIAN_STATES },
+      { key: "country", label: "Country", options: ["India"] },
+      { key: "pinCode", label: "Pin Code" },
+      { key: "mobile", label: "Mobile" },
+      { key: "phone", label: "Phone" },
+      { key: "email", label: "Email" },
+      { key: "whatsapp", label: "WhatsApp" }
     ]
   },
   {
@@ -247,7 +266,8 @@ export const MASTERS: MasterConfig[] = [
       { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
       { key: "patch", label: "Patch", sourceMaster: "patchNameMaster", sourceField: "patchName" },
       { key: "medicalRepresentative", label: "Medical Representative", sourceMaster: "employees", sourceField: "name" },
-      { key: "areaManager", label: "Area Manager", sourceMaster: "employees", sourceField: "name" }
+      { key: "areaManager", label: "Area Manager", sourceMaster: "employees", sourceField: "name" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -286,7 +306,8 @@ export const MASTERS: MasterConfig[] = [
       { key: "anniversary", label: "Anniversary", type: "date" },
       { key: "remarks", label: "Remarks" },
       { key: "latitude", label: "Latitude", type: "number" },
-      { key: "longitude", label: "Longitude", type: "number" }
+      { key: "longitude", label: "Longitude", type: "number" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -301,6 +322,15 @@ export const MASTERS: MasterConfig[] = [
         "Printing Material", "Cleaning Material", "Laboratory Reagent", "Consumable"
       ] },
       { key: "unit", label: "Unit", options: ["Kg", "Litre", "Nos", "Roll", "Box"] },
+      // The Input Master screen also shows these columns — declared here so
+      // the backend persists them instead of silently discarding whatever
+      // the Add form sends, which is why they always showed blank.
+      { key: "typeOfInput", label: "Type of Input", options: ["Physical", "Digital", "Financial"] },
+      { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
+      { key: "valueOfInput", label: "Value of Input" },
+      { key: "fromDate", label: "From", type: "date" },
+      { key: "toDate", label: "To", type: "date" },
+      { key: "financialYear", label: "Financial Year" },
       { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
@@ -369,7 +399,21 @@ export const MASTERS: MasterConfig[] = [
       { key: "stockistCode", label: "Stockist Code" },
       { key: "stockistName", label: "Stockist Name" },
       { key: "gstNo", label: "GST No" },
-      { key: "licenseNo", label: "License No" }
+      { key: "licenseNo", label: "License No" },
+      // The Stockist Master screen (both the regular and "Super Stockist"
+      // views) also shows these columns — declared here so the backend
+      // persists them instead of silently discarding whatever the Add form
+      // sends, which is why they always showed blank.
+      { key: "contactNumber", label: "Contact Number" },
+      { key: "emailAddress", label: "Email Address" },
+      { key: "territory", label: "Territory", sourceMaster: "patchNameMaster", sourceField: "patchName" },
+      { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
+      { key: "state", label: "State", options: INDIAN_STATES },
+      { key: "pinCode", label: "Pin Code" },
+      { key: "location", label: "Location" },
+      { key: "city", label: "City" },
+      { key: "pincode", label: "Pincode" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -381,7 +425,8 @@ export const MASTERS: MasterConfig[] = [
       { key: "address", label: "Address" },
       { key: "city", label: "City" },
       { key: "state", label: "State", options: INDIAN_STATES },
-      { key: "pin", label: "PIN" }
+      { key: "pin", label: "PIN" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -392,7 +437,8 @@ export const MASTERS: MasterConfig[] = [
       { key: "stockistCode", label: "Stockist Code", sourceMaster: "stockistMaster", sourceField: "stockistCode" },
       { key: "contactPerson", label: "Contact Person" },
       { key: "mobile", label: "Mobile" },
-      { key: "email", label: "Email" }
+      { key: "email", label: "Email" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -402,7 +448,8 @@ export const MASTERS: MasterConfig[] = [
     fields: [
       { key: "stockistCode", label: "Stockist Code", sourceMaster: "stockistMaster", sourceField: "stockistCode" },
       { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
-      { key: "territory", label: "Territory", sourceMaster: "patchNameMaster", sourceField: "patchName" }
+      { key: "territory", label: "Territory", sourceMaster: "patchNameMaster", sourceField: "patchName" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -412,7 +459,8 @@ export const MASTERS: MasterConfig[] = [
     fields: [
       { key: "stockistCode", label: "Stockist Code", sourceMaster: "stockistMaster", sourceField: "stockistCode" },
       { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
-      { key: "products", label: "Products" }
+      { key: "products", label: "Products" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -423,7 +471,8 @@ export const MASTERS: MasterConfig[] = [
       { key: "stockistCode", label: "Stockist Code", sourceMaster: "stockistMaster", sourceField: "stockistCode" },
       { key: "bank", label: "Bank" },
       { key: "accountNo", label: "Account No" },
-      { key: "ifsc", label: "IFSC" }
+      { key: "ifsc", label: "IFSC" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -433,7 +482,8 @@ export const MASTERS: MasterConfig[] = [
     fields: [
       { key: "stockistCode", label: "Stockist Code", sourceMaster: "stockistMaster", sourceField: "stockistCode" },
       { key: "drugLicense", label: "Drug License" },
-      { key: "expiryDate", label: "Expiry Date", type: "date" }
+      { key: "expiryDate", label: "Expiry Date", type: "date" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -537,6 +587,27 @@ export const MASTERS: MasterConfig[] = [
       { key: "monthly", label: "Monthly" },
       { key: "team", label: "Team", options: ["Zivira Field Team", "Astra Field Team", "Aura Field Team", "South Zone Managers"] },
       { key: "budget", label: "Budget", type: "number" }
+    ]
+  },
+  // "Reporting Structure" is a distinct view the frontend offers alongside
+  // Manager Expense — Reports (same screen, a toggle button switches
+  // between them) — but it's a genuinely different table (division's
+  // reporting chain, not a monthly budget), so it gets its own registry key
+  // instead of reusing expenseReports' fields/keyFields, which would make
+  // every add fail validation (no monthly/team inputs are ever shown in
+  // this view, so those required fields would always be missing).
+  {
+    key: "reportingStructure",
+    title: "Reporting Structure",
+    keyFields: ["division"],
+    fields: [
+      { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
+      { key: "bh", label: "BH", sourceMaster: "employees", sourceField: "name" },
+      { key: "zbm", label: "ZBM", sourceMaster: "employees", sourceField: "name" },
+      { key: "rbm", label: "RBM", sourceMaster: "employees", sourceField: "name" },
+      { key: "abm", label: "ABM", sourceMaster: "employees", sourceField: "name" },
+      { key: "be", label: "BE", sourceMaster: "employees", sourceField: "name" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
@@ -833,6 +904,81 @@ export const MASTERS: MasterConfig[] = [
       { key: "doctorCalls", label: "Doctor Calls", type: "number" },
       { key: "tourCompliance", label: "Tour Compliance", type: "number" },
       { key: "productivityScore", label: "Productivity Score", type: "number" }
+    ]
+  },
+
+  // ── Sales (4 masters) ────────────────────────────────────────────────
+  // These were previously only faked client-side (a hardcoded schema in
+  // generic-master-table.tsx with no backend collection behind it), so
+  // every save 404'd with "Unknown master" and the tables always showed 0
+  // records. Now real registry entries, cross-linked to Division/Region/
+  // Territory/Product the same way every other master is.
+  {
+    key: "targetMaster",
+    title: "Target Master",
+    keyFields: ["division", "hq", "product", "month"],
+    fields: [
+      { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
+      { key: "zone", label: "Zone", sourceMaster: "regionZoneMaster", sourceField: "zoneName" },
+      { key: "region", label: "Region", sourceMaster: "regionZoneMaster", sourceField: "regionName" },
+      { key: "area", label: "Area" },
+      { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
+      { key: "product", label: "Product", sourceMaster: "productMaster", sourceField: "productName" },
+      { key: "month", label: "Month" },
+      { key: "targetQty", label: "Target Qty", type: "number" },
+      { key: "targetValue", label: "Target Value", type: "number" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
+    ]
+  },
+  {
+    key: "primarySales",
+    title: "Primary Sales",
+    keyFields: ["division", "hq", "product", "month"],
+    fields: [
+      { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
+      { key: "zone", label: "Zone", sourceMaster: "regionZoneMaster", sourceField: "zoneName" },
+      { key: "region", label: "Region", sourceMaster: "regionZoneMaster", sourceField: "regionName" },
+      { key: "area", label: "Area" },
+      { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
+      { key: "product", label: "Product", sourceMaster: "productMaster", sourceField: "productName" },
+      { key: "month", label: "Month" },
+      { key: "achievedQty", label: "Achieved Qty", type: "number" },
+      { key: "achievedValue", label: "Achieved Value", type: "number" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
+    ]
+  },
+  {
+    key: "secondarySales",
+    title: "Secondary Sales",
+    keyFields: ["division", "hq", "product", "month"],
+    fields: [
+      { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
+      { key: "zone", label: "Zone", sourceMaster: "regionZoneMaster", sourceField: "zoneName" },
+      { key: "region", label: "Region", sourceMaster: "regionZoneMaster", sourceField: "regionName" },
+      { key: "area", label: "Area" },
+      { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
+      { key: "product", label: "Product", sourceMaster: "productMaster", sourceField: "productName" },
+      { key: "month", label: "Month" },
+      { key: "stockistOffQty", label: "Stockist Off-take Qty", type: "number" },
+      { key: "stockistOffValue", label: "Stockist Off-take Value", type: "number" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
+    ]
+  },
+  {
+    key: "claimsMaster",
+    title: "Claims Master",
+    keyFields: ["division", "hq", "product", "month"],
+    fields: [
+      { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
+      { key: "zone", label: "Zone", sourceMaster: "regionZoneMaster", sourceField: "zoneName" },
+      { key: "region", label: "Region", sourceMaster: "regionZoneMaster", sourceField: "regionName" },
+      { key: "area", label: "Area" },
+      { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
+      { key: "product", label: "Product", sourceMaster: "productMaster", sourceField: "productName" },
+      { key: "month", label: "Month" },
+      { key: "claimAmount", label: "Claim Amount", type: "number" },
+      { key: "approvalStatus", label: "Approval Status", options: ["Approved", "Pending", "Rejected"] },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   }
 ];

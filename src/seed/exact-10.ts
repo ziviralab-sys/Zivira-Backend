@@ -193,6 +193,7 @@ async function seedLegacyModels() {
     city: TERRITORIES[e.territoryIdx].city,
     state: TERRITORIES[e.territoryIdx].state,
     country: "India",
+    drivingLicense: `DL-${TERRITORIES[e.territoryIdx].state.slice(0, 2).toUpperCase()}-${String(2018 + (e.territoryIdx % 6)).slice(2)}-${String(1000000 + e.territoryIdx * 12345).slice(0, 7)}`,
     status: "ACTIVE"
   })), "Employee");
 
@@ -653,7 +654,7 @@ async function seedIdentityMasters() {
 
   const regionRows = TERRITORIES.map((t, i) => ({
     tenantSlug: TENANT, zoneName: t.zone, regionName: t.region, regionCode: `RG-${String(i + 1).padStart(2, "0")}`,
-    state: t.state, manager: pick(EMPLOYEES.filter((e) => e.role === "ABM" || e.role === "RBM"), i).name
+    state: t.state, manager: pick(EMPLOYEES.filter((e) => e.role === "ABM" || e.role === "RBM"), i).name, status: "Active"
   }));
   cache.set("regionZoneMaster", regionRows);
   await getMasterModel("regionZoneMaster").deleteMany({ tenantSlug: TENANT });
@@ -662,7 +663,7 @@ async function seedIdentityMasters() {
 
   const territoryRows = TERRITORIES.map((t, i) => ({
     tenantSlug: TENANT, hqCode: t.code, headquartersName: t.hq, state: t.state, city: t.city,
-    metroNonMetro: i % 2 === 0 ? "Metro" : "Non-Metro", zone: t.zone, region: t.region, patchName: `${t.city} Patch`
+    metroNonMetro: i % 2 === 0 ? "Metro" : "Non-Metro", zone: t.zone, region: t.region, patchName: `${t.city} Patch`, status: "Active"
   }));
   cache.set("territoryHqMaster", territoryRows);
   await getMasterModel("territoryHqMaster").deleteMany({ tenantSlug: TENANT });
@@ -686,7 +687,7 @@ async function seedIdentityMasters() {
   console.log(`  [OK] Molecule Master: ${moleculeRows.length} records`);
 
   const brandRows = PRODUCTS.map((p, i) => ({
-    tenantSlug: TENANT, brandCode: `BR-${String(i + 1).padStart(2, "0")}`, brandName: p.brand, molecule: p.molecule, therapy: p.therapy, division: p.division
+    tenantSlug: TENANT, brandCode: `BR-${String(i + 1).padStart(2, "0")}`, brandName: p.brand, molecule: p.molecule, therapy: p.therapy, division: p.division, status: "Active"
   }));
   cache.set("brandMaster", brandRows);
   await getMasterModel("brandMaster").deleteMany({ tenantSlug: TENANT });
@@ -704,7 +705,7 @@ async function seedIdentityMasters() {
 
   const rateRows = PRODUCTS.map((p, i) => ({
     tenantSlug: TENANT, product: p.name, batchNo: `BATCH-${p.code}`, manufacturingDate: daysAgo(180 + i * 10),
-    expiryDate: daysAgo(-540 - i * 10), pack: `1x${5 + i}`, ptr: 80 + i * 5, pts: 85 + i * 5, mrp: 110 + i * 8, effectiveDate: daysAgo(30)
+    expiryDate: daysAgo(-540 - i * 10), pack: `1x${5 + i}`, ptr: 80 + i * 5, pts: 85 + i * 5, mrp: 110 + i * 8, effectiveDate: daysAgo(30), status: "Active"
   }));
   cache.set("rateMaster", rateRows);
   await getMasterModel("rateMaster").deleteMany({ tenantSlug: TENANT });
@@ -712,7 +713,10 @@ async function seedIdentityMasters() {
   console.log(`  [OK] Rate Master: ${rateRows.length} records`);
 
   const doctorMasterRows = DOCTORS.map((d) => ({
-    tenantSlug: TENANT, doctorCode: d.code, doctorName: d.name, qualification: d.qualification, specialty: d.specialty, registrationNumber: `REG-${d.code}`
+    tenantSlug: TENANT, doctorCode: d.code, doctorName: d.name, qualification: d.qualification, specialty: d.specialty, registrationNumber: `REG-${d.code}`,
+    clinicName: `${d.name.replace("Dr. ", "")} Clinic`, address: `${TERRITORIES[d.territoryIdx].city} Medical Complex`, area: "Central Area",
+    city: TERRITORIES[d.territoryIdx].city, state: TERRITORIES[d.territoryIdx].state, country: "India", pinCode: `${560000 + d.territoryIdx * 111}`,
+    mobile: d.phone, phone: d.phone, email: d.email, whatsapp: d.phone
   }));
   cache.set("doctorMaster", doctorMasterRows);
   await getMasterModel("doctorMaster").deleteMany({ tenantSlug: TENANT });
@@ -740,7 +744,7 @@ async function seedIdentityMasters() {
   const doctorMappingRows = DOCTORS.map((d) => ({
     tenantSlug: TENANT, doctorCode: d.code, doctorName: d.name, division: PRODUCTS[DOCTORS.indexOf(d) % PRODUCTS.length].division,
     hq: TERRITORIES[d.territoryIdx].hq, patch: `${TERRITORIES[d.territoryIdx].city} Patch`,
-    medicalRepresentative: d.mappedEmployeeName, areaManager: EMPLOYEES.find((e) => e.role === "ABM")?.name ?? EMPLOYEES[2].name
+    medicalRepresentative: d.mappedEmployeeName, areaManager: EMPLOYEES.find((e) => e.role === "ABM")?.name ?? EMPLOYEES[2].name, status: "Active"
   }));
   await getMasterModel("doctorMapping").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("doctorMapping").insertMany(doctorMappingRows);
@@ -763,7 +767,7 @@ async function seedIdentityMasters() {
 
   const doctorAdditionalRows = DOCTORS.map((d, i) => ({
     tenantSlug: TENANT, doctorCode: d.code, doctorName: d.name, birthDate: daysAgo(15000 + i * 100),
-    anniversary: daysAgo(3000 + i * 50), remarks: "Standard demo record", latitude: 12.9 + i * 0.1, longitude: 77.5 + i * 0.1
+    anniversary: daysAgo(3000 + i * 50), remarks: "Standard demo record", latitude: 12.9 + i * 0.1, longitude: 77.5 + i * 0.1, status: "Active"
   }));
   await getMasterModel("doctorAdditionalInfo").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("doctorAdditionalInfo").insertMany(doctorAdditionalRows);
@@ -781,38 +785,42 @@ async function seedIdentityMasters() {
   await getMasterModel("patchNameMaster").insertMany(patchRows);
   console.log(`  [OK] Patch Name Master: ${patchRows.length} records`);
 
-  const stockistMasterRows = STOCKISTS.map((s) => ({ tenantSlug: TENANT, stockistCode: s.code, stockistName: s.name, gstNo: s.gst, licenseNo: `LIC-${s.code}` }));
+  const stockistMasterRows = STOCKISTS.map((s, i) => ({
+    tenantSlug: TENANT, stockistCode: s.code, stockistName: s.name, gstNo: s.gst, licenseNo: `LIC-${s.code}`,
+    contactNumber: s.phone, emailAddress: `${s.code.toLowerCase()}@stockist-demo.in`, territory: `${s.city} Patch`, hq: s.hq,
+    state: s.state, pinCode: `${560000 + i * 111}`, location: s.city, city: s.city, pincode: `${560000 + i * 111}`, status: "Active"
+  }));
   cache.set("stockistMaster", stockistMasterRows);
   await getMasterModel("stockistMaster").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("stockistMaster").insertMany(stockistMasterRows);
   console.log(`  [OK] Stockist Master: ${stockistMasterRows.length} records`);
 
-  const stockistAddressRows = STOCKISTS.map((s) => ({ tenantSlug: TENANT, stockistCode: s.code, address: s.address, city: s.city, state: s.state, pin: `${560000 + STOCKISTS.indexOf(s) * 111}` }));
+  const stockistAddressRows = STOCKISTS.map((s) => ({ tenantSlug: TENANT, stockistCode: s.code, address: s.address, city: s.city, state: s.state, pin: `${560000 + STOCKISTS.indexOf(s) * 111}`, status: "Active" }));
   await getMasterModel("stockistAddress").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("stockistAddress").insertMany(stockistAddressRows);
   console.log(`  [OK] Stockist — Address: ${stockistAddressRows.length} records`);
 
-  const stockistContactRows = STOCKISTS.map((s, i) => ({ tenantSlug: TENANT, stockistCode: s.code, contactPerson: `Contact Person ${i + 1}`, mobile: s.phone, email: `${s.code.toLowerCase()}@stockist-demo.in` }));
+  const stockistContactRows = STOCKISTS.map((s, i) => ({ tenantSlug: TENANT, stockistCode: s.code, contactPerson: `Contact Person ${i + 1}`, mobile: s.phone, email: `${s.code.toLowerCase()}@stockist-demo.in`, status: "Active" }));
   await getMasterModel("stockistContact").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("stockistContact").insertMany(stockistContactRows);
   console.log(`  [OK] Stockist — Contact: ${stockistContactRows.length} records`);
 
-  const stockistHqRows = STOCKISTS.map((s) => ({ tenantSlug: TENANT, stockistCode: s.code, hq: s.hq, territory: `${s.city} Patch` }));
+  const stockistHqRows = STOCKISTS.map((s) => ({ tenantSlug: TENANT, stockistCode: s.code, hq: s.hq, territory: `${s.city} Patch`, status: "Active" }));
   await getMasterModel("stockistHeadquarters").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("stockistHeadquarters").insertMany(stockistHqRows);
   console.log(`  [OK] Stockist — Headquarters: ${stockistHqRows.length} records`);
 
-  const stockistDivisionRows = STOCKISTS.map((s, i) => ({ tenantSlug: TENANT, stockistCode: s.code, division: DIVISIONS_3[i % 3], products: PRODUCTS.filter((p) => p.division === DIVISIONS_3[i % 3]).map((p) => p.name).join(", ") }));
+  const stockistDivisionRows = STOCKISTS.map((s, i) => ({ tenantSlug: TENANT, stockistCode: s.code, division: DIVISIONS_3[i % 3], products: PRODUCTS.filter((p) => p.division === DIVISIONS_3[i % 3]).map((p) => p.name).join(", "), status: "Active" }));
   await getMasterModel("stockistDivisionMapping").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("stockistDivisionMapping").insertMany(stockistDivisionRows);
   console.log(`  [OK] Stockist — Division Mapping: ${stockistDivisionRows.length} records`);
 
-  const stockistBankRows = STOCKISTS.map((s, i) => ({ tenantSlug: TENANT, stockistCode: s.code, bank: pick(["HDFC Bank", "ICICI Bank", "State Bank of India", "Axis Bank", "Kotak Mahindra Bank"], i), accountNo: `${100000000000 + i * 11111}`, ifsc: `${pick(["HDFC", "ICIC", "SBIN", "UTIB", "KKBK"], i)}0${String(i).padStart(6, "0")}` }));
+  const stockistBankRows = STOCKISTS.map((s, i) => ({ tenantSlug: TENANT, stockistCode: s.code, bank: pick(["HDFC Bank", "ICICI Bank", "State Bank of India", "Axis Bank", "Kotak Mahindra Bank"], i), accountNo: `${100000000000 + i * 11111}`, ifsc: `${pick(["HDFC", "ICIC", "SBIN", "UTIB", "KKBK"], i)}0${String(i).padStart(6, "0")}`, status: "Active" }));
   await getMasterModel("stockistBankDetails").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("stockistBankDetails").insertMany(stockistBankRows);
   console.log(`  [OK] Stockist — Bank Details: ${stockistBankRows.length} records`);
 
-  const stockistLicenseRows = STOCKISTS.map((s, i) => ({ tenantSlug: TENANT, stockistCode: s.code, drugLicense: `DL-${s.code}`, expiryDate: daysAgo(-365 - i * 20) }));
+  const stockistLicenseRows = STOCKISTS.map((s, i) => ({ tenantSlug: TENANT, stockistCode: s.code, drugLicense: `DL-${s.code}`, expiryDate: daysAgo(-365 - i * 20), status: "Active" }));
   await getMasterModel("stockistLicenseDetails").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("stockistLicenseDetails").insertMany(stockistLicenseRows);
   console.log(`  [OK] Stockist — License Details: ${stockistLicenseRows.length} records`);
@@ -822,7 +830,11 @@ async function seedIdentityMasters() {
   await getMasterModel("stockistStatus").insertMany(stockistStatusRows);
   console.log(`  [OK] Stockist — Status: ${stockistStatusRows.length} records`);
 
-  const inputRows = GIFT_ITEM_TYPES.map((name, i) => ({ tenantSlug: TENANT, inputCode: `INP-${String(i + 1).padStart(2, "0")}`, inputName: name, category: pick(["Gift Item", "Literature", "Sample Bag", "Stationery"], i), unit: pick(["Nos", "Box", "Roll"], i), status: "Active" }));
+  const inputRows = GIFT_ITEM_TYPES.map((name, i) => ({
+    tenantSlug: TENANT, inputCode: `INP-${String(i + 1).padStart(2, "0")}`, inputName: name, category: pick(["Gift Item", "Literature", "Sample Bag", "Stationery"], i), unit: pick(["Nos", "Box", "Roll"], i),
+    typeOfInput: pick(["Physical", "Digital", "Financial"], i), division: DIVISIONS_3[i % 3], valueOfInput: `${50 + i * 25}`,
+    fromDate: daysAgo(180), toDate: daysAgo(-185), financialYear: "2025-26", status: "Active"
+  }));
   cache.set("inputMaster", inputRows);
   await getMasterModel("inputMaster").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("inputMaster").insertMany(inputRows);
@@ -833,6 +845,59 @@ async function seedIdentityMasters() {
   await getMasterModel("expenseTypes").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("expenseTypes").insertMany(expenseTypeRows);
   console.log(`  [OK] Expense Types: ${expenseTypeRows.length} records`);
+}
+
+// Reporting Structure (division's BH/ZBM/RBM/ABM/BE chain) + the 4 Sales
+// masters (Target/Primary/Secondary/Claims) — cross-linked to the same
+// division/zone/region/hq/product identities as everything else, instead of
+// the generic placeholder text seedMasterGeneric() would produce.
+async function seedSalesAndReportingMasters() {
+  console.log("\n── Generic masters registry — Reporting Structure & Sales tabs ──");
+
+  const managers = {
+    bh: EMPLOYEES.find((e) => e.role === "NBH")?.name ?? EMPLOYEES[0].name,
+    zbm: EMPLOYEES.find((e) => e.role === "RBM")?.name ?? EMPLOYEES[1].name,
+    rbm: EMPLOYEES.find((e) => e.role === "RBM")?.name ?? EMPLOYEES[1].name,
+    abm: EMPLOYEES.find((e) => e.role === "ABM")?.name ?? EMPLOYEES[2].name,
+    be: EMPLOYEES.find((e) => e.role === "MR" || e.role === "SR_MR")?.name ?? EMPLOYEES[4].name
+  };
+  const reportingRows = TERRITORIES.map((t, i) => ({
+    tenantSlug: TENANT, division: DIVISIONS_3[i % 3], bh: managers.bh, zbm: managers.zbm, rbm: managers.rbm, abm: managers.abm, be: managers.be, status: "Active"
+  }));
+  await getMasterModel("reportingStructure").deleteMany({ tenantSlug: TENANT });
+  await getMasterModel("reportingStructure").insertMany(reportingRows);
+  console.log(`  [OK] Reporting Structure: ${reportingRows.length} records`);
+
+  const months = ["April 2026", "May 2026", "June 2026", "July 2026", "August 2026", "September 2026", "October 2026", "November 2026", "December 2026", "January 2027"];
+  function salesRows(mkValue: (i: number) => Record<string, unknown>) {
+    return TERRITORIES.map((t, i) => {
+      const p = PRODUCTS[i];
+      return {
+        tenantSlug: TENANT, division: p.division, zone: t.zone, region: t.region, area: `${t.city} Area`, hq: t.hq,
+        product: p.name, month: months[i], status: "Active", ...mkValue(i)
+      };
+    });
+  }
+
+  const targetRows = salesRows((i) => ({ targetQty: 500 + i * 50, targetValue: (500 + i * 50) * (110 + i * 8) }));
+  await getMasterModel("targetMaster").deleteMany({ tenantSlug: TENANT });
+  await getMasterModel("targetMaster").insertMany(targetRows);
+  console.log(`  [OK] Target Master: ${targetRows.length} records`);
+
+  const primaryRows = salesRows((i) => ({ achievedQty: 420 + i * 45, achievedValue: (420 + i * 45) * (110 + i * 8) }));
+  await getMasterModel("primarySales").deleteMany({ tenantSlug: TENANT });
+  await getMasterModel("primarySales").insertMany(primaryRows);
+  console.log(`  [OK] Primary Sales: ${primaryRows.length} records`);
+
+  const secondaryRows = salesRows((i) => ({ stockistOffQty: 380 + i * 40, stockistOffValue: (380 + i * 40) * (110 + i * 8) }));
+  await getMasterModel("secondarySales").deleteMany({ tenantSlug: TENANT });
+  await getMasterModel("secondarySales").insertMany(secondaryRows);
+  console.log(`  [OK] Secondary Sales: ${secondaryRows.length} records`);
+
+  const claimsRows = salesRows((i) => ({ claimAmount: 5000 + i * 750, approvalStatus: ["Approved", "Pending", "Rejected"][i % 3] }));
+  await getMasterModel("claimsMaster").deleteMany({ tenantSlug: TENANT });
+  await getMasterModel("claimsMaster").insertMany(claimsRows);
+  console.log(`  [OK] Claims Master: ${claimsRows.length} records`);
 }
 
 // The remaining ~30 masters (attendance/holiday/expense-setup/daily-MR-work
@@ -898,6 +963,7 @@ export async function runExactTenSeed() {
   const tourPlanDocs = await seedTourPlans();
   await seedExpenseClaims(tourPlanDocs);
   await seedIdentityMasters();
+  await seedSalesAndReportingMasters();
   await seedRemainingGenericMasters();
   await ensureDemoLoginsExist();
   await verifyAllMastersHaveExactly10();

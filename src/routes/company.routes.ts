@@ -69,7 +69,8 @@ const employeeSchema = z.object({
   division: z.string().min(2),
   reportingManager: z.string().optional(),
   territory: z.string().min(2),
-  role: z.enum(["NBH", "BH", "RBM", "ZBM", "ABM", "SR_MR", "MR"]),
+  role: z.enum(["NBH", "BH", "RBM", "ZBM", "ABM", "SR_MR", "MR", "OTHER"]),
+  drivingLicense: z.string().optional(),
   status: z.enum(["ACTIVE", "INACTIVE"]).default("ACTIVE")
 });
 
@@ -917,7 +918,10 @@ companyRouter.get("/expenses", asyncHandler(async (req, res) => {
 const hospitalValidation = z.object({
   hospitalCode: z.string().min(1),
   hospitalName: z.string().min(1),
-  type: z.enum(["Private", "Government", "Trust", "Other"]).default("Private"),
+  // The Admin UI's Add Hospital form offers Multi-Specialty/Super-Specialty/
+  // General Clinic — the original Private/Government/Trust/Other list is
+  // kept too so already-seeded rows using it still validate on edit.
+  type: z.enum(["Multi-Specialty", "Super-Specialty", "General Clinic", "Private", "Government", "Trust", "Other"]).default("Multi-Specialty"),
   city: z.string().optional(),
   medicalRepresentative: z.string().optional(),
   status: z.enum(["ACTIVE", "INACTIVE"]).default("ACTIVE")
