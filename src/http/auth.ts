@@ -8,6 +8,7 @@ export type JwtPayload = {
   role: string;
   portal: string;
   tenantSlug?: string;
+  employeeCode?: string;
 };
 
 declare global {
@@ -62,6 +63,18 @@ export function requireFieldForce(req: Request, _res: Response, next: NextFuncti
   const role = req.auth?.role;
   if ((role !== "MR" && role !== "SR_MR") || req.auth?.portal !== "FIELD_FORCE" || !req.auth?.tenantSlug) {
     return next(new HttpError(403, "Field Force access required"));
+  }
+
+  next();
+}
+
+// Employee Self-Service (ESS) login — Zivira_HR_Client_Requirement_1B.docx
+// "Employee Login" screen. Scoped to the logged-in employee's own
+// employeeCode; every /api/ess/* route filters by this, never by tenant
+// alone, so one employee can never see another's data.
+export function requireEmployee(req: Request, _res: Response, next: NextFunction) {
+  if (req.auth?.role !== "EMPLOYEE" || req.auth?.portal !== "EMPLOYEE" || !req.auth?.tenantSlug || !req.auth?.employeeCode) {
+    return next(new HttpError(403, "Employee access required"));
   }
 
   next();

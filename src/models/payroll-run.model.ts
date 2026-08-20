@@ -16,6 +16,16 @@ const payrollRunSchema = new Schema(
     workingDays: { type: Number, required: true },
     lwpDays: { type: Number, default: 0 },
     lwpDeduction: { type: Number, default: 0 },
+    // Phase 1 MVP items: Incentive, Loan, Arrears, Basic Tax Visibility
+    // (Zivira_HR_Client_Requirement_1A.docx §32). "Basic" tax visibility
+    // means a visible, editable figure — not an automated slab calculation,
+    // which the doc explicitly defers to Phase 2 ("Automated Tax").
+    incentive: { type: Number, default: 0 },
+    incentiveNote: { type: String, default: null },
+    loanDeduction: { type: Number, default: 0 },
+    loanId: { type: Schema.Types.ObjectId, ref: "Loan", default: null },
+    arrears: { type: Number, default: 0 },
+    estimatedTax: { type: Number, default: 0 },
     netPay: { type: Number, required: true },
     roundingRule: { type: String, default: "NEAREST_RUPEE" },
     status: { type: String, enum: ["DRAFT", "HR_APPROVED", "LOCKED"], default: "DRAFT", index: true },

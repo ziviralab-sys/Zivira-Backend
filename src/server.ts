@@ -13,6 +13,7 @@ import { managerRouter } from "./routes/manager.routes.js";
 import { healthRouter } from "./routes/health.routes.js";
 import { superAdminRouter } from "./routes/superadmin.routes.js";
 import { seedRouter } from "./routes/seed.routes.js";
+import { essRouter } from "./routes/ess.routes.js";
 import { startAutoApproveJob }   from "./jobs/auto-approve.job.js";
 import { startManagerDigestJob } from "./jobs/manager-digest.job.js";
 
@@ -39,6 +40,9 @@ app.use("/api/superadmin", superAdminRouter);
 app.use("/api/company", companyRouter);
 app.use("/api/field", fieldRouter);
 app.use("/api/manager", managerRouter);
+// Employee Self-Service (ESS) — Zivira_HR_Client_Requirement_1B.docx
+// "Employee Login" portal, gated by requireEmployee (see src/http/auth.ts).
+app.use("/api/ess", essRouter);
 // Protected by the x-seed-secret header (SEED_SECRET env var) — see
 // src/routes/seed.routes.ts. This is how master data gets (re)seeded on
 // Render, which has no shell access to run scripts/seed-exact-10.ts directly.

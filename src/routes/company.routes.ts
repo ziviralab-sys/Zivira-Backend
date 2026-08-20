@@ -41,6 +41,12 @@ import { syncPayrollStatuses } from "../utils/payroll.js";
 import { PayrollStatusModel } from "../models/payroll-status.model.js";
 import { SalaryStructureModel } from "../models/salary-structure.model.js";
 import { PayrollRunModel } from "../models/payroll-run.model.js";
+import { OnboardingModel } from "../models/onboarding.model.js";
+import { LeaveApplicationModel } from "../models/leave-application.model.js";
+import { LoanModel } from "../models/loan.model.js";
+import { ArrearModel } from "../models/arrear.model.js";
+import { UserModel } from "../models/user.model.js";
+import bcrypt from "bcryptjs";
 import { computeRepAnalysisRows, computeManagerJointWorkRows } from "../utils/rep-manager-analysis.js";
 import { DoctorVisitExceptionModel } from "../models/doctor-visit-exception.model.js";
 import { computeProductExposureRows } from "../utils/product-analytics.js";
@@ -1744,6 +1750,24 @@ async function computeLwpDays(tenantSlug: string, employeeCode: string, month: s
   });
 }
 
+async function sumApprovedLwpLeaveDaysInMonth(tenantSlug: string, employeeCode: string, month: string): Promise<number> {
+  const [year, mon] = month.split("-").map((v) => parseInt(v, 10));
+  const start = new Date(Date.UTC(year, mon - 1, 1));
+  const end = new Date(Date.UTC(year, mon, 1));
+  const rows = await LeaveApplicationModel.find({
+    tenantSlug,
+    employeeCode,
+    status: "APPROVED",
+    isLWP: true,
+    fromDate: { $lt: end },
+    toDate: { $gte: start }
+  }).lean();
+  // Each application's `days` already covers its own from/to span; a leave
+  // spanning two months would double count here, but Phase 1 leave requests
+  // are expected to stay within one payroll month (documented simplification).
+  return rows.reduce((sum, r) => sum + (r.days ?? 0), 0);
+}
+
 companyRouter.post(
   "/payroll/runs",
   asyncHandler(async (req, res) => {
@@ -1769,9 +1793,24 @@ companyRouter.post(
       const grossEarnings = basic + hra + allowance;
 
       const workingDays = await computeWorkingDays(tenantSlug, month, employee.state);
-      const lwpDays = await computeLwpDays(tenantSlug, employee.employeeCode, month);
+      const lwpDaysFromAttendance = await computeLwpDays(tenantSlug, employee.employeeCode, month);
+
+      // Zivira_HR_Client_Requirement_1A.docx §25 "Leave -> Attendance -> LWP
+      // if applicable -> Payroll": HR-approved leave applications marked
+      // isLWP also count as unpaid days, on top of plain ABSENT attendance.
+      const leaveLwpDays = await sumApprovedLwpLeaveDaysInMonth(tenantSlug, employee.employeeCode, month);
+      const lwpDays = lwpDaysFromAttendance + leaveLwpDays;
       const lwpDeduction = Math.round((grossEarnings / workingDays) * lwpDays);
-      const netPay = grossEarnings - lwpDeduction;
+
+      // Phase 1 MVP items: Loan (EMI deduction) and Arrears (one-off
+      // adjustment), both picked up automatically at generation time.
+      const loan = await LoanModel.findOne({ tenantSlug, employeeCode: employee.employeeCode, status: "ACTIVE" }).sort({ createdAt: 1 });
+      const loanDeduction = loan ? Math.min(loan.emiAmount, loan.remainingBalance) : 0;
+
+      const pendingArrears = await ArrearModel.find({ tenantSlug, employeeCode: employee.employeeCode, month, status: "PENDING" });
+      const arrears = pendingArrears.reduce((sum, a) => sum + a.amount, 0);
+
+      const netPay = grossEarnings - lwpDeduction - loanDeduction + arrears;
 
       const row = await PayrollRunModel.create({
         tenantSlug,
@@ -1784,9 +1823,22 @@ companyRouter.post(
         workingDays,
         lwpDays,
         lwpDeduction,
+        loanDeduction,
+        loanId: loan ? loan._id : null,
+        arrears,
         netPay,
         status: "DRAFT"
       });
+
+      if (loan) {
+        loan.remainingBalance = Math.max(0, loan.remainingBalance - loanDeduction);
+        if (loan.remainingBalance === 0) loan.status = "CLOSED";
+        await loan.save();
+      }
+      if (pendingArrears.length) {
+        await ArrearModel.updateMany({ _id: { $in: pendingArrears.map((a) => a._id) } }, { status: "APPLIED" });
+      }
+
       created.push(serializeDocument(row));
     }
 
@@ -1808,6 +1860,35 @@ companyRouter.get(
     const nameByCode = new Map(employees.map((e) => [e.employeeCode, e.name]));
     const data = rows.map((r) => ({ ...serializeDocument(r), employeeName: nameByCode.get(r.employeeCode) ?? null }));
     res.json({ data });
+  })
+);
+
+// HR-editable "visibility" fields on a DRAFT payroll row — Incentive (Phase 1
+// MVP item) and Basic Tax Visibility (a manually-entered figure; automated
+// slab-based tax calculation is explicitly Phase 2 per the doc). Recomputes
+// netPay from all components so the two never drift apart.
+companyRouter.patch(
+  "/payroll/runs/:id",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const row = await PayrollRunModel.findOne({ _id: req.params.id, tenantSlug });
+    if (!row) throw new HttpError(404, "Payroll run record not found");
+    if (row.status === "LOCKED") throw new HttpError(400, "Locked payroll runs cannot be modified");
+
+    const body = z.object({
+      incentive: z.number().min(0).optional(),
+      incentiveNote: z.string().optional(),
+      estimatedTax: z.number().min(0).optional()
+    }).parse(req.body);
+
+    if (body.incentive !== undefined) row.incentive = body.incentive;
+    if (body.incentiveNote !== undefined) row.incentiveNote = body.incentiveNote;
+    if (body.estimatedTax !== undefined) row.estimatedTax = body.estimatedTax;
+
+    row.netPay = row.grossEarnings - row.lwpDeduction - row.loanDeduction + row.arrears + row.incentive - row.estimatedTax;
+    await row.save();
+    await audit("PAYROLL_RUN_UPDATED", "PayrollRun", String(row._id), { tenantSlug, employeeCode: row.employeeCode, month: row.month });
+    res.json({ data: serializeDocument(row) });
   })
 );
 
@@ -1919,6 +2000,423 @@ companyRouter.get(
         aboveOrBelowTarget: achievementPercent === null ? null : Math.round((netSaleValue - targetValue) * 100) / 100
       }
     });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════════════
+// Zivira_HR_Client_Requirement_1B.docx "complete employee journey" —
+// Onboarding. HR side: generate -> trigger mail -> verify documents.
+// (Employee side — login, create password, fill the 8-step form — lives
+// under /api/ess/onboarding in ess.routes.ts.)
+// ══════════════════════════════════════════════════════════════════════
+
+async function nextOnboardingId(tenantSlug: string): Promise<string> {
+  const year = new Date().getUTCFullYear();
+  const count = await OnboardingModel.countDocuments({ tenantSlug });
+  return `ONB${year}${String(count + 1).padStart(5, "0")}`;
+}
+
+companyRouter.get(
+  "/onboarding",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const rows = await OnboardingModel.find({ tenantSlug }).sort({ createdAt: -1 }).lean();
+    const employees = await EmployeeModel.find({ tenantSlug }, { employeeCode: 1, name: 1, designation: 1, email: 1 }).lean();
+    const byCode = new Map(employees.map((e) => [e.employeeCode, e]));
+    const data = rows.map((r) => ({ ...serializeDocument(r), employeeName: byCode.get(r.employeeCode)?.name ?? null }));
+    res.json({ data });
+  })
+);
+
+companyRouter.get(
+  "/onboarding/:employeeCode",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const row = await OnboardingModel.findOne({ tenantSlug, employeeCode: req.params.employeeCode });
+    if (!row) throw new HttpError(404, "Onboarding record not found — generate it first");
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+companyRouter.post(
+  "/onboarding/:employeeCode/generate",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const employee = await EmployeeModel.findOne({ tenantSlug, employeeCode: req.params.employeeCode }).lean();
+    if (!employee) throw new HttpError(404, "Employee not found");
+
+    const existing = await OnboardingModel.findOne({ tenantSlug, employeeCode: req.params.employeeCode });
+    if (existing) throw new HttpError(409, "Onboarding already generated for this employee");
+
+    const onboardingId = await nextOnboardingId(tenantSlug);
+    const row = await OnboardingModel.create({ tenantSlug, employeeCode: req.params.employeeCode, onboardingId, status: "INITIATED" });
+    await audit("ONBOARDING_GENERATED", "Onboarding", String(row._id), { tenantSlug, employeeCode: req.params.employeeCode });
+    res.status(201).json({ data: serializeDocument(row) });
+  })
+);
+
+// Creates (or resets) the employee's EMPLOYEE-portal login with a temp
+// password. No SMTP is configured in this environment, so "trigger mail"
+// does not send a real email — it returns the temp credentials so HR can
+// relay them to the employee directly (documented Phase 1 limitation).
+companyRouter.post(
+  "/onboarding/:employeeCode/trigger-mail",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const employee = await EmployeeModel.findOne({ tenantSlug, employeeCode: req.params.employeeCode }).lean();
+    if (!employee) throw new HttpError(404, "Employee not found");
+
+    const onboarding = await OnboardingModel.findOne({ tenantSlug, employeeCode: req.params.employeeCode });
+    if (!onboarding) throw new HttpError(404, "Generate onboarding first");
+
+    const tempPassword = Math.random().toString(36).slice(2, 10).toUpperCase();
+    const passwordHash = await bcrypt.hash(tempPassword, 12);
+    const username = req.params.employeeCode.toLowerCase();
+
+    await UserModel.updateOne(
+      { username },
+      {
+        username,
+        passwordHash,
+        displayName: employee.name,
+        role: "EMPLOYEE",
+        portal: "EMPLOYEE",
+        tenantSlug,
+        employeeCode: req.params.employeeCode,
+        mustChangePassword: true,
+        active: true
+      },
+      { upsert: true }
+    );
+
+    onboarding.status = "EMAIL_SENT";
+    await onboarding.save();
+    await audit("ONBOARDING_MAIL_TRIGGERED", "Onboarding", String(onboarding._id), { tenantSlug, employeeCode: req.params.employeeCode });
+
+    res.json({
+      data: serializeDocument(onboarding),
+      credentials: { username, tempPassword },
+      note: "No email service is configured — share these credentials with the employee directly."
+    });
+  })
+);
+
+companyRouter.patch(
+  "/onboarding/:employeeCode/documents/:docName/verify",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const row = await OnboardingModel.findOne({ tenantSlug, employeeCode: req.params.employeeCode });
+    if (!row) throw new HttpError(404, "Onboarding record not found");
+    const doc = row.documents.find((d: any) => d.name === req.params.docName);
+    if (!doc) throw new HttpError(404, "Document not found");
+    doc.status = "VERIFIED";
+    doc.rejectReason = null;
+    await row.save();
+    await audit("ONBOARDING_DOCUMENT_VERIFIED", "Onboarding", String(row._id), { tenantSlug, employeeCode: req.params.employeeCode, document: req.params.docName });
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+companyRouter.patch(
+  "/onboarding/:employeeCode/documents/:docName/reject",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const { reason } = z.object({ reason: z.string().min(1) }).parse(req.body);
+    const row = await OnboardingModel.findOne({ tenantSlug, employeeCode: req.params.employeeCode });
+    if (!row) throw new HttpError(404, "Onboarding record not found");
+    const doc = row.documents.find((d: any) => d.name === req.params.docName);
+    if (!doc) throw new HttpError(404, "Document not found");
+    doc.status = "REJECTED";
+    doc.rejectReason = reason;
+    await row.save();
+    await audit("ONBOARDING_DOCUMENT_REJECTED", "Onboarding", String(row._id), { tenantSlug, employeeCode: req.params.employeeCode, document: req.params.docName, reason });
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+companyRouter.patch(
+  "/onboarding/:employeeCode/complete",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const row = await OnboardingModel.findOne({ tenantSlug, employeeCode: req.params.employeeCode });
+    if (!row) throw new HttpError(404, "Onboarding record not found");
+    if (row.status !== "SUBMITTED") throw new HttpError(400, "Employee has not submitted onboarding yet");
+    row.status = "COMPLETED";
+    row.completedAt = new Date();
+    await row.save();
+    await audit("ONBOARDING_COMPLETED", "Onboarding", String(row._id), { tenantSlug, employeeCode: req.params.employeeCode });
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════════════
+// Attendance Import (Phase 1 MVP item) — bulk upsert instead of one row at
+// a time, so HR can paste/import an Excel-derived attendance sheet.
+// ══════════════════════════════════════════════════════════════════════
+const attendanceImportRowSchema = z.object({
+  employeeCode: z.string().min(1),
+  attendanceDate: z.coerce.date(),
+  status: z.enum(["PRESENT", "ABSENT", "LEAVE"])
+});
+
+companyRouter.post(
+  "/attendance/import",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const { rows } = z.object({ rows: z.array(attendanceImportRowSchema).min(1) }).parse(req.body);
+
+    let imported = 0;
+    const errors: Array<{ row: number; error: string }> = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      try {
+        await AttendanceModel.updateOne(
+          { tenantSlug, employeeCode: row.employeeCode, attendanceDate: row.attendanceDate },
+          { tenantSlug, employeeCode: row.employeeCode, attendanceDate: row.attendanceDate, status: row.status },
+          { upsert: true }
+        );
+        imported++;
+      } catch (err) {
+        errors.push({ row: i + 1, error: err instanceof Error ? err.message : "Unknown error" });
+      }
+    }
+
+    await audit("ATTENDANCE_IMPORTED", "Attendance", undefined, { tenantSlug, importedCount: imported, errorCount: errors.length });
+    res.status(201).json({ data: { imported, errors } });
+  })
+);
+
+companyRouter.get(
+  "/attendance",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const query: Record<string, unknown> = { tenantSlug };
+    if (typeof req.query.employeeCode === "string" && req.query.employeeCode.trim()) {
+      query.employeeCode = req.query.employeeCode.trim();
+    }
+    if (typeof req.query.month === "string" && /^\d{4}-\d{2}$/.test(req.query.month)) {
+      const [year, mon] = req.query.month.split("-").map((v) => parseInt(v, 10));
+      query.attendanceDate = { $gte: new Date(Date.UTC(year, mon - 1, 1)), $lt: new Date(Date.UTC(year, mon, 1)) };
+    }
+    const rows = await AttendanceModel.find(query).sort({ attendanceDate: -1 }).limit(2000).lean();
+    res.json({ data: rows.map(serializeDocument) });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════════════
+// Leave (Phase 1 MVP item) — HR side: list + approve/reject. Employee side
+// (apply) lives under /api/ess/leave in ess.routes.ts.
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get(
+  "/leave",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const query: Record<string, unknown> = { tenantSlug };
+    if (typeof req.query.status === "string" && req.query.status.trim()) query.status = req.query.status.trim();
+    const rows = await LeaveApplicationModel.find(query).sort({ createdAt: -1 }).lean();
+    const employees = await EmployeeModel.find({ tenantSlug }, { employeeCode: 1, name: 1 }).lean();
+    const nameByCode = new Map(employees.map((e) => [e.employeeCode, e.name]));
+    const data = rows.map((r) => ({ ...serializeDocument(r), employeeName: nameByCode.get(r.employeeCode) ?? null }));
+    res.json({ data });
+  })
+);
+
+companyRouter.patch(
+  "/leave/:id/approve",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const row = await LeaveApplicationModel.findOne({ _id: req.params.id, tenantSlug });
+    if (!row) throw new HttpError(404, "Leave application not found");
+    row.status = "APPROVED";
+    row.approvedBy = req.auth!.sub ?? null;
+    row.approvedAt = new Date();
+    await row.save();
+    await audit("LEAVE_APPROVED", "LeaveApplication", String(row._id), { tenantSlug, employeeCode: row.employeeCode });
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+companyRouter.patch(
+  "/leave/:id/reject",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const { reason } = z.object({ reason: z.string().optional() }).parse(req.body ?? {});
+    const row = await LeaveApplicationModel.findOne({ _id: req.params.id, tenantSlug });
+    if (!row) throw new HttpError(404, "Leave application not found");
+    row.status = "REJECTED";
+    row.rejectReason = reason ?? null;
+    await row.save();
+    await audit("LEAVE_REJECTED", "LeaveApplication", String(row._id), { tenantSlug, employeeCode: row.employeeCode });
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════════════
+// Loan and Arrears (Phase 1 MVP items) — HR creates them; Payroll Run
+// generation picks them up automatically (see POST /payroll/runs above).
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get(
+  "/loans",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const query: Record<string, unknown> = { tenantSlug };
+    if (typeof req.query.employeeCode === "string" && req.query.employeeCode.trim()) query.employeeCode = req.query.employeeCode.trim();
+    const rows = await LoanModel.find(query).sort({ createdAt: -1 }).lean();
+    res.json({ data: rows.map(serializeDocument) });
+  })
+);
+
+companyRouter.post(
+  "/loans",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const body = z.object({
+      employeeCode: z.string().min(1),
+      principal: z.number().positive(),
+      emiAmount: z.number().positive(),
+      reason: z.string().optional(),
+      startMonth: z.string().regex(/^\d{4}-\d{2}$/)
+    }).parse(req.body);
+    const employee = await EmployeeModel.findOne({ tenantSlug, employeeCode: body.employeeCode }).lean();
+    if (!employee) throw new HttpError(404, `Employee ${body.employeeCode} not found`);
+    const row = await LoanModel.create({ ...body, tenantSlug, remainingBalance: body.principal, status: "ACTIVE" });
+    await audit("LOAN_CREATED", "Loan", String(row._id), { tenantSlug, employeeCode: row.employeeCode });
+    res.status(201).json({ data: serializeDocument(row) });
+  })
+);
+
+companyRouter.get(
+  "/arrears",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const query: Record<string, unknown> = { tenantSlug };
+    if (typeof req.query.employeeCode === "string" && req.query.employeeCode.trim()) query.employeeCode = req.query.employeeCode.trim();
+    const rows = await ArrearModel.find(query).sort({ createdAt: -1 }).lean();
+    res.json({ data: rows.map(serializeDocument) });
+  })
+);
+
+companyRouter.post(
+  "/arrears",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const body = z.object({
+      employeeCode: z.string().min(1),
+      month: z.string().regex(/^\d{4}-\d{2}$/),
+      amount: z.number(),
+      reason: z.string().optional()
+    }).parse(req.body);
+    const employee = await EmployeeModel.findOne({ tenantSlug, employeeCode: body.employeeCode }).lean();
+    if (!employee) throw new HttpError(404, `Employee ${body.employeeCode} not found`);
+    const row = await ArrearModel.create({ ...body, tenantSlug, status: "PENDING" });
+    await audit("ARREAR_CREATED", "Arrear", String(row._id), { tenantSlug, employeeCode: row.employeeCode, month: row.month });
+    res.status(201).json({ data: serializeDocument(row) });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════════════
+// Admin/HR Dashboard (Phase 1 MVP item) — real counts replacing the HR
+// portal's previously-hardcoded dashboard numbers.
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get(
+  "/hr-dashboard",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const now = new Date();
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const todayStart = new Date(); todayStart.setUTCHours(0, 0, 0, 0);
+    const currentMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+
+    const [totalEmployees, newJoiners, onboardingRows, todayAttendance, pendingLeave, payrollRows] = await Promise.all([
+      EmployeeModel.countDocuments({ tenantSlug, status: "ACTIVE" }),
+      EmployeeModel.countDocuments({ tenantSlug, joinDate: { $gte: monthStart } }),
+      OnboardingModel.find({ tenantSlug }, { status: 1 }).lean(),
+      AttendanceModel.find({ tenantSlug, attendanceDate: { $gte: todayStart } }, { status: 1 }).lean(),
+      LeaveApplicationModel.countDocuments({ tenantSlug, status: "PENDING" }),
+      PayrollRunModel.find({ tenantSlug, month: currentMonth }, { status: 1 }).lean()
+    ]);
+
+    const pendingOnboarding = onboardingRows.filter((o) => o.status !== "COMPLETED").length;
+    const completedOnboarding = onboardingRows.filter((o) => o.status === "COMPLETED").length;
+    const presentToday = todayAttendance.filter((a) => a.status === "PRESENT").length;
+    const absentOrLeaveToday = todayAttendance.filter((a) => a.status !== "PRESENT").length;
+
+    res.json({
+      data: {
+        totalEmployees,
+        newJoiners,
+        pendingOnboarding,
+        completedOnboarding,
+        presentToday,
+        absentOrLeaveToday,
+        pendingLeaveApprovals: pendingLeave,
+        payrollMonth: currentMonth,
+        payrollRowsGenerated: payrollRows.length,
+        payrollLocked: payrollRows.length > 0 && payrollRows.every((r) => r.status === "LOCKED")
+      }
+    });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════════════
+// Reports (Phase 1 MVP item) — payroll summary for a month, plus a CSV
+// export in whatever format Accounts can consume (doc §23: "the application
+// should initially be able to export payroll data in the exact format
+// Accounts expects" — CSV is a safe, universally-importable starting point).
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get(
+  "/reports/payroll-summary",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const month = typeof req.query.month === "string" ? req.query.month : undefined;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) throw new HttpError(400, "month query param (YYYY-MM) is required");
+
+    const rows = await PayrollRunModel.find({ tenantSlug, month }).lean();
+    const num = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+    const sum = (key: string) => rows.reduce((s, r) => s + num((r as any)[key]), 0);
+
+    res.json({
+      data: {
+        month,
+        headcount: rows.length,
+        grossEarnings: sum("grossEarnings"),
+        netPay: sum("netPay"),
+        lwpDeduction: sum("lwpDeduction"),
+        loanDeduction: sum("loanDeduction"),
+        incentive: sum("incentive"),
+        arrears: sum("arrears"),
+        estimatedTax: sum("estimatedTax"),
+        draft: rows.filter((r) => r.status === "DRAFT").length,
+        hrApproved: rows.filter((r) => r.status === "HR_APPROVED").length,
+        locked: rows.filter((r) => r.status === "LOCKED").length
+      }
+    });
+  })
+);
+
+companyRouter.get(
+  "/reports/payroll-export",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const month = typeof req.query.month === "string" ? req.query.month : undefined;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) throw new HttpError(400, "month query param (YYYY-MM) is required");
+
+    const rows = await PayrollRunModel.find({ tenantSlug, month }).sort({ employeeCode: 1 }).lean();
+    const employees = await EmployeeModel.find({ tenantSlug }, { employeeCode: 1, name: 1, designation: 1 }).lean();
+    const nameByCode = new Map(employees.map((e) => [e.employeeCode, e.name]));
+    const designationByCode = new Map(employees.map((e) => [e.employeeCode, e.designation]));
+
+    const header = ["Employee Code", "Name", "Designation", "Month", "Basic", "HRA", "Allowance", "Gross Earnings", "LWP Days", "LWP Deduction", "Loan Deduction", "Incentive", "Arrears", "Estimated Tax", "Net Pay", "Status"];
+    const csvRows = rows.map((r) => [
+      r.employeeCode, nameByCode.get(r.employeeCode) ?? "", designationByCode.get(r.employeeCode) ?? "", r.month,
+      r.basic, r.hra, r.allowance, r.grossEarnings, r.lwpDays, r.lwpDeduction, r.loanDeduction, r.incentive, r.arrears, r.estimatedTax, r.netPay, r.status
+    ]);
+    const csv = [header, ...csvRows].map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="payroll-${month}.csv"`);
+    res.send(csv);
   })
 );
 

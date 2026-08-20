@@ -1,0 +1,248 @@
+import { Router } from "express";
+import { z } from "zod";
+import { asyncHandler } from "../http/async-handler.js";
+import { requireAuth, requireEmployee } from "../http/auth.js";
+import { HttpError } from "../http/errors.js";
+import { EmployeeModel } from "../models/employee.model.js";
+import { OnboardingModel } from "../models/onboarding.model.js";
+import { AttendanceModel } from "../models/attendance.model.js";
+import { LeaveApplicationModel } from "../models/leave-application.model.js";
+import { LeaveTypeModel } from "../models/leave-type.model.js";
+import { LoanModel } from "../models/loan.model.js";
+import { PayrollRunModel } from "../models/payroll-run.model.js";
+import { audit } from "../utils/audit.js";
+import { serializeDocument } from "../utils/serialize.js";
+
+// Employee Self-Service (ESS) — Zivira_HR_Client_Requirement_1B.docx
+// "complete employee journey": EMPLOYEE LOGIN -> CREATE PASSWORD ->
+// FILL ONBOARDING (8 steps) -> SUBMIT ONBOARDING, plus the day-to-day
+// ESS screens (own Attendance, Leave, Payslip, Loans) from 1A §31's
+// RBAC table ("Employee: Profile, Attendance, Leave, Payslip, Tax,
+// Loans, Documents — own records only").
+//
+// Every route here is gated by requireEmployee, which puts tenantSlug
+// AND employeeCode on req.auth — every query below filters by BOTH, so
+// one employee can never read or write another employee's data.
+export const essRouter = Router();
+
+essRouter.use(requireAuth, requireEmployee);
+
+// ── Profile ─────────────────────────────────────────────────────────
+essRouter.get(
+  "/profile",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug, employeeCode } = req.auth!;
+    const employee = await EmployeeModel.findOne({ tenantSlug, employeeCode }).lean();
+    if (!employee) throw new HttpError(404, "Employee record not found");
+    const onboarding = await OnboardingModel.findOne({ tenantSlug, employeeCode }).lean();
+    res.json({
+      data: {
+        ...serializeDocument(employee),
+        onboardingStatus: onboarding?.status ?? "NOT_STARTED"
+      }
+    });
+  })
+);
+
+// ── Onboarding (doc: FILL ONBOARDING 8 steps -> SUBMIT / SAVE & EXIT) ─
+essRouter.get(
+  "/onboarding",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug, employeeCode } = req.auth!;
+    const row = await OnboardingModel.findOne({ tenantSlug, employeeCode });
+    if (!row) throw new HttpError(404, "Onboarding has not been initiated by HR yet");
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+const onboardingSaveSchema = z.object({
+  personal: z.record(z.any()).optional(),
+  address: z.record(z.any()).optional(),
+  education: z.array(z.record(z.any())).optional(),
+  experience: z.array(z.record(z.any())).optional(),
+  bank: z.record(z.any()).optional(),
+  statutory: z.record(z.any()).optional()
+});
+
+// "SAVE & EXIT" — partial save, does not require every field, moves
+// status forward but never past IN_PROGRESS.
+essRouter.put(
+  "/onboarding",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug, employeeCode } = req.auth!;
+    const body = onboardingSaveSchema.parse(req.body);
+    const row = await OnboardingModel.findOne({ tenantSlug, employeeCode });
+    if (!row) throw new HttpError(404, "Onboarding has not been initiated by HR yet");
+    if (row.status === "SUBMITTED" || row.status === "COMPLETED") {
+      throw new HttpError(400, "Onboarding has already been submitted and can no longer be edited");
+    }
+
+    if (body.personal !== undefined) row.personal = body.personal;
+    if (body.address !== undefined) row.address = body.address;
+    if (body.education !== undefined) row.education = body.education;
+    if (body.experience !== undefined) row.experience = body.experience;
+    if (body.bank !== undefined) row.bank = body.bank;
+    if (body.statutory !== undefined) row.statutory = body.statutory;
+    if (row.status === "EMAIL_SENT" || row.status === "PASSWORD_CREATED" || row.status === "INITIATED" || row.status === "NOT_STARTED") {
+      row.status = "IN_PROGRESS";
+    }
+
+    await row.save();
+    await audit("ONBOARDING_SAVED", "Onboarding", String(row._id), { tenantSlug, employeeCode });
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+// Employee marks a document as uploaded (metadata only — no file storage
+// backend is configured in this environment; fileName is whatever the
+// browser reports, kept as a record for HR to cross-check, documented
+// Phase 1 limitation).
+essRouter.post(
+  "/onboarding/documents/:docName",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug, employeeCode } = req.auth!;
+    const { fileName } = z.object({ fileName: z.string().min(1) }).parse(req.body);
+    const row = await OnboardingModel.findOne({ tenantSlug, employeeCode });
+    if (!row) throw new HttpError(404, "Onboarding has not been initiated by HR yet");
+    const doc = row.documents.find((d: any) => d.name === req.params.docName);
+    if (!doc) throw new HttpError(404, "Document not found");
+    doc.fileName = fileName;
+    doc.status = "UPLOADED";
+    doc.rejectReason = null;
+    await row.save();
+    await audit("ONBOARDING_DOCUMENT_UPLOADED", "Onboarding", String(row._id), { tenantSlug, employeeCode, document: req.params.docName });
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+// SUBMIT ONBOARDING — doc's final review-and-submit step. Requires
+// personal/address/bank to be filled and every document at least
+// UPLOADED (VERIFIED comes later from HR's review step).
+essRouter.post(
+  "/onboarding/submit",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug, employeeCode } = req.auth!;
+    const row = await OnboardingModel.findOne({ tenantSlug, employeeCode });
+    if (!row) throw new HttpError(404, "Onboarding has not been initiated by HR yet");
+    if (row.status === "SUBMITTED" || row.status === "COMPLETED") {
+      throw new HttpError(400, "Onboarding has already been submitted");
+    }
+    if (!row.personal || !row.address || !row.bank) {
+      throw new HttpError(400, "Personal Info, Address, and Bank Details sections are required before submitting");
+    }
+    const missingDocs = row.documents.filter((d: any) => d.status === "PENDING").map((d: any) => d.name);
+    if (missingDocs.length > 0) {
+      throw new HttpError(400, `Please upload the following documents before submitting: ${missingDocs.join(", ")}`);
+    }
+
+    row.status = "SUBMITTED";
+    row.submittedAt = new Date();
+    await row.save();
+    await audit("ONBOARDING_SUBMITTED", "Onboarding", String(row._id), { tenantSlug, employeeCode });
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+// ── Attendance (own records only) ──────────────────────────────────
+essRouter.get(
+  "/attendance",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug, employeeCode } = req.auth!;
+    const query: Record<string, unknown> = { tenantSlug, employeeCode };
+    if (typeof req.query.month === "string" && /^\d{4}-\d{2}$/.test(req.query.month)) {
+      const [year, mon] = req.query.month.split("-").map((v) => parseInt(v, 10));
+      query.attendanceDate = { $gte: new Date(Date.UTC(year, mon - 1, 1)), $lt: new Date(Date.UTC(year, mon, 1)) };
+    }
+    const rows = await AttendanceModel.find(query).sort({ attendanceDate: -1 }).limit(400).lean();
+    res.json({ data: rows.map(serializeDocument) });
+  })
+);
+
+// ── Leave (own records: view + apply) ──────────────────────────────
+essRouter.get(
+  "/leave",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug, employeeCode } = req.auth!;
+    const rows = await LeaveApplicationModel.find({ tenantSlug, employeeCode }).sort({ createdAt: -1 }).lean();
+    res.json({ data: rows.map(serializeDocument) });
+  })
+);
+
+essRouter.get(
+  "/leave/types",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug } = req.auth!;
+    const rows = await LeaveTypeModel.find({ tenantSlug, status: "ACTIVE" }).sort({ leaveTypeDesc: 1 }).lean();
+    res.json({ data: rows.map(serializeDocument) });
+  })
+);
+
+const leaveApplySchema = z.object({
+  leaveType: z.string().min(1),
+  fromDate: z.coerce.date(),
+  toDate: z.coerce.date(),
+  reason: z.string().optional()
+});
+
+essRouter.post(
+  "/leave",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug, employeeCode } = req.auth!;
+    const body = leaveApplySchema.parse(req.body);
+    if (body.toDate < body.fromDate) throw new HttpError(400, "To Date cannot be before From Date");
+
+    const days = Math.round((body.toDate.getTime() - body.fromDate.getTime()) / 86400000) + 1;
+    // "Loss of Pay" / "LWP" leave types flow into the payroll LWP
+    // deduction (see company.routes.ts POST /payroll/runs); every other
+    // leave type is treated as paid.
+    const isLWP = /loss of pay|lwp/i.test(body.leaveType);
+
+    const row = await LeaveApplicationModel.create({
+      tenantSlug,
+      employeeCode,
+      leaveType: body.leaveType,
+      fromDate: body.fromDate,
+      toDate: body.toDate,
+      days,
+      reason: body.reason ?? null,
+      isLWP,
+      status: "PENDING"
+    });
+    await audit("LEAVE_APPLIED", "LeaveApplication", String(row._id), { tenantSlug, employeeCode });
+    res.status(201).json({ data: serializeDocument(row) });
+  })
+);
+
+// ── Payslips (own Payroll Run rows — Basic Tax Visibility included) ─
+essRouter.get(
+  "/payslips",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug, employeeCode } = req.auth!;
+    // An employee should only see a payslip once HR has moved past DRAFT —
+    // DRAFT rows are still subject to change during HR's review.
+    const rows = await PayrollRunModel.find({ tenantSlug, employeeCode, status: { $in: ["HR_APPROVED", "LOCKED"] } })
+      .sort({ month: -1 })
+      .lean();
+    res.json({ data: rows.map(serializeDocument) });
+  })
+);
+
+essRouter.get(
+  "/payslips/:id",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug, employeeCode } = req.auth!;
+    const row = await PayrollRunModel.findOne({ _id: req.params.id, tenantSlug, employeeCode, status: { $in: ["HR_APPROVED", "LOCKED"] } }).lean();
+    if (!row) throw new HttpError(404, "Payslip not found");
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+// ── Loans (own records only) ───────────────────────────────────────
+essRouter.get(
+  "/loans",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug, employeeCode } = req.auth!;
+    const rows = await LoanModel.find({ tenantSlug, employeeCode }).sort({ createdAt: -1 }).lean();
+    res.json({ data: rows.map(serializeDocument) });
+  })
+);
