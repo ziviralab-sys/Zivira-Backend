@@ -45,6 +45,8 @@ import { OnboardingModel } from "../models/onboarding.model.js";
 import { LeaveApplicationModel } from "../models/leave-application.model.js";
 import { LoanModel } from "../models/loan.model.js";
 import { ArrearModel } from "../models/arrear.model.js";
+import { StatutoryRuleModel } from "../models/statutory-rule.model.js";
+import { CompOffModel } from "../models/comp-off.model.js";
 import { UserModel } from "../models/user.model.js";
 import bcrypt from "bcryptjs";
 import { computeRepAnalysisRows, computeManagerJointWorkRows } from "../utils/rep-manager-analysis.js";
@@ -1706,6 +1708,197 @@ companyRouter.post(
   })
 );
 
+// ══════════════════════════════════════════════════════════════════════
+// Payroll Rules Engine (Phase 2 "Advanced Statutory Calculations" + OT
+// policy) — restores the old mock UI's editable PF/Professional-Tax
+// screen with real, connected data. One ACTIVE StatutoryRule doc per
+// tenant; GET returns it (creating tenant defaults on first access), PUT
+// deactivates the old row and inserts a new ACTIVE one so past payroll
+// runs keep whatever numbers were baked in at generation time.
+// ══════════════════════════════════════════════════════════════════════
+async function getActiveStatutoryRule(tenantSlug: string) {
+  let rule = await StatutoryRuleModel.findOne({ tenantSlug, status: "ACTIVE" }).sort({ createdAt: -1 });
+  if (!rule) {
+    rule = await StatutoryRuleModel.create({ tenantSlug });
+  }
+  return rule;
+}
+
+companyRouter.get(
+  "/payroll/rules",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const rule = await getActiveStatutoryRule(tenantSlug);
+    res.json({ data: serializeDocument(rule) });
+  })
+);
+
+const professionalTaxSlabInput = z.object({
+  minGross: z.number().min(0),
+  maxGross: z.number().min(0).nullable(),
+  amount: z.number().min(0)
+});
+
+const statutoryRuleSchema = z.object({
+  pfEnabled: z.boolean().default(true),
+  pfEmployeeRate: z.number().min(0).max(100).default(12),
+  pfEmployerRate: z.number().min(0).max(100).default(12),
+  pfWageCeiling: z.number().min(0).default(15000),
+  ptEnabled: z.boolean().default(true),
+  ptSlabs: z.array(professionalTaxSlabInput).default([]),
+  esiEnabled: z.boolean().default(false),
+  esiEmployeeRate: z.number().min(0).max(100).default(0.75),
+  esiEmployerRate: z.number().min(0).max(100).default(3.25),
+  esiWageCeiling: z.number().min(0).default(21000),
+  otEnabled: z.boolean().default(true),
+  standardShiftHours: z.number().min(1).max(24).default(9),
+  otRatePerHour: z.number().min(0).default(0)
+});
+
+companyRouter.put(
+  "/payroll/rules",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const body = statutoryRuleSchema.parse(req.body);
+
+    await StatutoryRuleModel.updateMany({ tenantSlug, status: "ACTIVE" }, { status: "INACTIVE" });
+    const row = await StatutoryRuleModel.create({
+      ...body,
+      tenantSlug,
+      status: "ACTIVE",
+      updatedBy: req.auth!.sub ?? null
+    });
+    await audit("PAYROLL_RULES_UPDATED", "StatutoryRule", String(row._id), { tenantSlug });
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+// PF is computed on min(basic, wage ceiling) — the standard EPFO rule.
+// Professional Tax looks up the slab whose [minGross, maxGross] range
+// contains grossEarnings (maxGross === null means "no upper bound").
+// ESI (when enabled) only applies to employees whose gross is at/below
+// the ESI wage ceiling — above it they are simply not ESI-eligible.
+function computeStatutoryDeductions(rule: any, basic: number, grossEarnings: number) {
+  const pfEmployee = rule.pfEnabled ? Math.round((Math.min(basic, rule.pfWageCeiling) * rule.pfEmployeeRate) / 100) : 0;
+  const pfEmployer = rule.pfEnabled ? Math.round((Math.min(basic, rule.pfWageCeiling) * rule.pfEmployerRate) / 100) : 0;
+
+  let professionalTax = 0;
+  if (rule.ptEnabled) {
+    const slab = (rule.ptSlabs as any[]).find(
+      (s) => grossEarnings >= s.minGross && (s.maxGross === null || s.maxGross === undefined || grossEarnings <= s.maxGross)
+    );
+    professionalTax = slab ? slab.amount : 0;
+  }
+
+  let esiEmployee = 0;
+  let esiEmployer = 0;
+  if (rule.esiEnabled && grossEarnings <= rule.esiWageCeiling) {
+    esiEmployee = Math.round((grossEarnings * rule.esiEmployeeRate) / 100);
+    esiEmployer = Math.round((grossEarnings * rule.esiEmployerRate) / 100);
+  }
+
+  return { pfEmployee, pfEmployer, professionalTax, esiEmployee, esiEmployer };
+}
+
+// OT (Phase 2 item) — sums, across every PRESENT day in the month, worked
+// hours beyond the rule's standardShiftHours, using the real
+// checkInAt/checkOutAt punch times captured on the Attendance Register.
+// Days missing either punch time contribute 0 OT hours (nothing to derive
+// them from — not fabricated). Paid at otRatePerHour if HR set one,
+// otherwise derived as 2x the employee's basic hourly rate (a common
+// statutory OT multiplier) so the field is never silently zero once hours
+// exist.
+async function computeOvertimeForMonth(
+  tenantSlug: string,
+  employeeCode: string,
+  month: string,
+  rule: any,
+  basic: number,
+  workingDays: number
+): Promise<{ otHours: number; otAmount: number }> {
+  if (!rule.otEnabled) return { otHours: 0, otAmount: 0 };
+
+  const [year, mon] = month.split("-").map((v: string) => parseInt(v, 10));
+  const start = new Date(Date.UTC(year, mon - 1, 1));
+  const end = new Date(Date.UTC(year, mon, 1));
+
+  const rows = await AttendanceModel.find({
+    tenantSlug,
+    employeeCode,
+    attendanceDate: { $gte: start, $lt: end },
+    status: "PRESENT",
+    checkInAt: { $ne: null },
+    checkOutAt: { $ne: null }
+  }).lean();
+
+  let otHours = 0;
+  for (const r of rows) {
+    if (!r.checkInAt || !r.checkOutAt) continue;
+    const hoursWorked = (new Date(r.checkOutAt).getTime() - new Date(r.checkInAt).getTime()) / 3600000;
+    if (hoursWorked > rule.standardShiftHours) {
+      otHours += hoursWorked - rule.standardShiftHours;
+    }
+  }
+  otHours = Math.round(otHours * 100) / 100;
+  if (otHours <= 0) return { otHours: 0, otAmount: 0 };
+
+  const hourlyRate = rule.otRatePerHour > 0
+    ? rule.otRatePerHour
+    : (basic / (workingDays * rule.standardShiftHours)) * 2;
+  const otAmount = Math.round(otHours * hourlyRate);
+  return { otHours, otAmount };
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Comp-Off (Phase 2 MVP item) — HR grants a credit; employee spends it via
+// ESS leave/apply with isCompOff=true (ess.routes.ts). List here is the
+// same grant ledger used by both the HR screen and the Reports export.
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get(
+  "/comp-offs",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const query: Record<string, unknown> = { tenantSlug };
+    if (typeof req.query.employeeCode === "string" && req.query.employeeCode.trim()) {
+      query.employeeCode = req.query.employeeCode.trim();
+    }
+    const rows = await CompOffModel.find(query).sort({ createdAt: -1 }).lean();
+    const employees = await EmployeeModel.find({ tenantSlug }, { employeeCode: 1, name: 1 }).lean();
+    const nameByCode = new Map(employees.map((e) => [e.employeeCode, e.name]));
+    const data = rows.map((r) => ({ ...serializeDocument(r), employeeName: nameByCode.get(r.employeeCode) ?? null }));
+    res.json({ data });
+  })
+);
+
+const compOffGrantSchema = z.object({
+  employeeCode: z.string().min(1),
+  earnedDate: z.coerce.date(),
+  reason: z.string().min(1),
+  expiresOn: z.coerce.date().optional()
+});
+
+companyRouter.post(
+  "/comp-offs",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const body = compOffGrantSchema.parse(req.body);
+    const employee = await EmployeeModel.findOne({ tenantSlug, employeeCode: body.employeeCode }).lean();
+    if (!employee) throw new HttpError(404, `Employee ${body.employeeCode} not found`);
+
+    const row = await CompOffModel.create({
+      tenantSlug,
+      employeeCode: body.employeeCode,
+      earnedDate: body.earnedDate,
+      reason: body.reason,
+      expiresOn: body.expiresOn ?? null,
+      status: "AVAILABLE",
+      grantedBy: req.auth!.sub ?? null
+    });
+    await audit("COMP_OFF_GRANTED", "CompOff", String(row._id), { tenantSlug, employeeCode: body.employeeCode });
+    res.status(201).json({ data: serializeDocument(row) });
+  })
+);
+
 // Working days for a "YYYY-MM" month = days in month minus Sundays minus
 // state holidays recorded for the employee's state in the Holiday master
 // (weekendHoliday / otherHolidayDate). Deliberately simple; documented as
@@ -1810,7 +2003,14 @@ companyRouter.post(
       const pendingArrears = await ArrearModel.find({ tenantSlug, employeeCode: employee.employeeCode, month, status: "PENDING" });
       const arrears = pendingArrears.reduce((sum, a) => sum + a.amount, 0);
 
-      const netPay = grossEarnings - lwpDeduction - loanDeduction + arrears;
+      // Phase 2 "Advanced Statutory Calculations" (PF/PT/ESI) and "OT" —
+      // computed from whichever StatutoryRule is ACTIVE for the tenant
+      // right now, baked into this row so it never silently changes later.
+      const rule = await getActiveStatutoryRule(tenantSlug);
+      const { pfEmployee, pfEmployer, professionalTax, esiEmployee, esiEmployer } = computeStatutoryDeductions(rule, basic, grossEarnings);
+      const { otHours, otAmount } = await computeOvertimeForMonth(tenantSlug, employee.employeeCode, month, rule, basic, workingDays);
+
+      const netPay = grossEarnings - lwpDeduction - loanDeduction + arrears - pfEmployee - professionalTax - esiEmployee + otAmount;
 
       const row = await PayrollRunModel.create({
         tenantSlug,
@@ -1826,6 +2026,13 @@ companyRouter.post(
         loanDeduction,
         loanId: loan ? loan._id : null,
         arrears,
+        pfEmployee,
+        pfEmployer,
+        professionalTax,
+        esiEmployee,
+        esiEmployer,
+        otHours,
+        otAmount,
         netPay,
         status: "DRAFT"
       });
@@ -1885,7 +2092,8 @@ companyRouter.patch(
     if (body.incentiveNote !== undefined) row.incentiveNote = body.incentiveNote;
     if (body.estimatedTax !== undefined) row.estimatedTax = body.estimatedTax;
 
-    row.netPay = row.grossEarnings - row.lwpDeduction - row.loanDeduction + row.arrears + row.incentive - row.estimatedTax;
+    row.netPay = row.grossEarnings - row.lwpDeduction - row.loanDeduction + row.arrears + row.incentive - row.estimatedTax
+      - row.pfEmployee - row.professionalTax - row.esiEmployee + row.otAmount;
     await row.save();
     await audit("PAYROLL_RUN_UPDATED", "PayrollRun", String(row._id), { tenantSlug, employeeCode: row.employeeCode, month: row.month });
     res.json({ data: serializeDocument(row) });
@@ -2156,7 +2364,13 @@ companyRouter.patch(
 const attendanceImportRowSchema = z.object({
   employeeCode: z.string().min(1),
   attendanceDate: z.coerce.date(),
-  status: z.enum(["PRESENT", "ABSENT", "LEAVE"])
+  status: z.enum(["PRESENT", "ABSENT", "LEAVE"]),
+  // Punch In / Punch Out — manual entry or bulk Excel/CSV import in Phase 1
+  // (no biometric device integration; that's explicitly Phase 2 per
+  // Zivira_HR_Client_Requirement_1A.docx §32's Phase 2 list). Optional so a
+  // plain status-only row (the original Phase 1 shape) still works.
+  checkInAt: z.coerce.date().optional(),
+  checkOutAt: z.coerce.date().optional()
 });
 
 companyRouter.post(
@@ -2173,7 +2387,14 @@ companyRouter.post(
       try {
         await AttendanceModel.updateOne(
           { tenantSlug, employeeCode: row.employeeCode, attendanceDate: row.attendanceDate },
-          { tenantSlug, employeeCode: row.employeeCode, attendanceDate: row.attendanceDate, status: row.status },
+          {
+            tenantSlug,
+            employeeCode: row.employeeCode,
+            attendanceDate: row.attendanceDate,
+            status: row.status,
+            ...(row.checkInAt ? { checkInAt: row.checkInAt } : {}),
+            ...(row.checkOutAt ? { checkOutAt: row.checkOutAt } : {})
+          },
           { upsert: true }
         );
         imported++;
@@ -2247,6 +2468,10 @@ companyRouter.patch(
     row.status = "REJECTED";
     row.rejectReason = reason ?? null;
     await row.save();
+    // If this application spent a Comp-Off credit, give it back on rejection.
+    if (row.isCompOff && row.compOffId) {
+      await CompOffModel.updateOne({ _id: row.compOffId, tenantSlug }, { status: "AVAILABLE", usedInLeaveId: null });
+    }
     await audit("LEAVE_REJECTED", "LeaveApplication", String(row._id), { tenantSlug, employeeCode: row.employeeCode });
     res.json({ data: serializeDocument(row) });
   })
@@ -2387,6 +2612,13 @@ companyRouter.get(
         incentive: sum("incentive"),
         arrears: sum("arrears"),
         estimatedTax: sum("estimatedTax"),
+        pfEmployee: sum("pfEmployee"),
+        pfEmployer: sum("pfEmployer"),
+        professionalTax: sum("professionalTax"),
+        esiEmployee: sum("esiEmployee"),
+        esiEmployer: sum("esiEmployer"),
+        otHours: sum("otHours"),
+        otAmount: sum("otAmount"),
         draft: rows.filter((r) => r.status === "DRAFT").length,
         hrApproved: rows.filter((r) => r.status === "HR_APPROVED").length,
         locked: rows.filter((r) => r.status === "LOCKED").length
@@ -2407,16 +2639,111 @@ companyRouter.get(
     const nameByCode = new Map(employees.map((e) => [e.employeeCode, e.name]));
     const designationByCode = new Map(employees.map((e) => [e.employeeCode, e.designation]));
 
-    const header = ["Employee Code", "Name", "Designation", "Month", "Basic", "HRA", "Allowance", "Gross Earnings", "LWP Days", "LWP Deduction", "Loan Deduction", "Incentive", "Arrears", "Estimated Tax", "Net Pay", "Status"];
+    const header = [
+      "Employee Code", "Name", "Designation", "Month", "Basic", "HRA", "Allowance", "Gross Earnings",
+      "LWP Days", "LWP Deduction", "Loan Deduction", "Incentive", "Arrears", "Estimated Tax",
+      "PF Employee", "PF Employer", "Professional Tax", "ESI Employee", "ESI Employer", "OT Hours", "OT Amount",
+      "Net Pay", "Status"
+    ];
     const csvRows = rows.map((r) => [
       r.employeeCode, nameByCode.get(r.employeeCode) ?? "", designationByCode.get(r.employeeCode) ?? "", r.month,
-      r.basic, r.hra, r.allowance, r.grossEarnings, r.lwpDays, r.lwpDeduction, r.loanDeduction, r.incentive, r.arrears, r.estimatedTax, r.netPay, r.status
+      r.basic, r.hra, r.allowance, r.grossEarnings, r.lwpDays, r.lwpDeduction, r.loanDeduction, r.incentive, r.arrears, r.estimatedTax,
+      r.pfEmployee, r.pfEmployer, r.professionalTax, r.esiEmployee, r.esiEmployer, r.otHours, r.otAmount,
+      r.netPay, r.status
     ]);
     const csv = [header, ...csvRows].map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
 
     res.setHeader("Content-Type", "text/csv");
     res.setHeader("Content-Disposition", `attachment; filename="payroll-${month}.csv"`);
     res.send(csv);
+  })
+);
+
+// Phase 2 "Advanced Reports" — statutory (PF/PT/ESI) compliance report,
+// the figure Accounts/compliance filings need per month, plus its CSV
+// export in the same header style as payroll-export above.
+companyRouter.get(
+  "/reports/statutory-summary",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const month = typeof req.query.month === "string" ? req.query.month : undefined;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) throw new HttpError(400, "month query param (YYYY-MM) is required");
+
+    const rows = await PayrollRunModel.find({ tenantSlug, month }).sort({ employeeCode: 1 }).lean();
+    const employees = await EmployeeModel.find({ tenantSlug }, { employeeCode: 1, name: 1 }).lean();
+    const nameByCode = new Map(employees.map((e) => [e.employeeCode, e.name]));
+
+    const data = rows.map((r) => ({
+      employeeCode: r.employeeCode,
+      employeeName: nameByCode.get(r.employeeCode) ?? null,
+      basic: r.basic,
+      pfEmployee: r.pfEmployee,
+      pfEmployer: r.pfEmployer,
+      professionalTax: r.professionalTax,
+      esiEmployee: r.esiEmployee,
+      esiEmployer: r.esiEmployer
+    }));
+
+    const totals = data.reduce(
+      (acc, r) => ({
+        pfEmployee: acc.pfEmployee + r.pfEmployee,
+        pfEmployer: acc.pfEmployer + r.pfEmployer,
+        professionalTax: acc.professionalTax + r.professionalTax,
+        esiEmployee: acc.esiEmployee + r.esiEmployee,
+        esiEmployer: acc.esiEmployer + r.esiEmployer
+      }),
+      { pfEmployee: 0, pfEmployer: 0, professionalTax: 0, esiEmployee: 0, esiEmployer: 0 }
+    );
+
+    res.json({ data: { month, rows: data, totals } });
+  })
+);
+
+// Phase 2 "OT" report — hours and amount paid per employee for the month.
+companyRouter.get(
+  "/reports/ot-summary",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const month = typeof req.query.month === "string" ? req.query.month : undefined;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) throw new HttpError(400, "month query param (YYYY-MM) is required");
+
+    const rows = await PayrollRunModel.find({ tenantSlug, month, otHours: { $gt: 0 } }).sort({ otHours: -1 }).lean();
+    const employees = await EmployeeModel.find({ tenantSlug }, { employeeCode: 1, name: 1 }).lean();
+    const nameByCode = new Map(employees.map((e) => [e.employeeCode, e.name]));
+
+    const data = rows.map((r) => ({
+      employeeCode: r.employeeCode,
+      employeeName: nameByCode.get(r.employeeCode) ?? null,
+      otHours: r.otHours,
+      otAmount: r.otAmount
+    }));
+    const totalHours = data.reduce((s, r) => s + r.otHours, 0);
+    const totalAmount = data.reduce((s, r) => s + r.otAmount, 0);
+
+    res.json({ data: { month, rows: data, totalHours, totalAmount } });
+  })
+);
+
+// Phase 2 "Comp-Off" report — grant/spend ledger across the whole tenant
+// (not month-scoped, since a credit can be earned in one month and spent
+// in another).
+companyRouter.get(
+  "/reports/comp-off-summary",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const rows = await CompOffModel.find({ tenantSlug }).sort({ createdAt: -1 }).lean();
+    const employees = await EmployeeModel.find({ tenantSlug }, { employeeCode: 1, name: 1 }).lean();
+    const nameByCode = new Map(employees.map((e) => [e.employeeCode, e.name]));
+
+    const data = rows.map((r) => ({ ...serializeDocument(r), employeeName: nameByCode.get(r.employeeCode) ?? null }));
+    res.json({
+      data: {
+        rows: data,
+        available: rows.filter((r) => r.status === "AVAILABLE").length,
+        used: rows.filter((r) => r.status === "USED").length,
+        expired: rows.filter((r) => r.status === "EXPIRED").length
+      }
+    });
   })
 );
 

@@ -17,6 +17,11 @@ const leaveApplicationSchema = new Schema(
     // LWP = counts as unpaid Loss-of-Pay for the Payroll Run's LWP calc.
     // Any other leave type is treated as paid.
     isLWP: { type: Boolean, default: false },
+    // Phase 2 "Comp-Off" item: when true, this application spends an
+    // AVAILABLE CompOff credit instead of drawing from a leave-type
+    // balance — see comp-off.model.ts and ess.routes.ts leave/apply.
+    isCompOff: { type: Boolean, default: false },
+    compOffId: { type: Schema.Types.ObjectId, ref: "CompOff", default: null },
     status: { type: String, enum: ["PENDING", "APPROVED", "REJECTED"], default: "PENDING", index: true },
     approvedBy: { type: String, default: null },
     approvedAt: { type: Date, default: null },

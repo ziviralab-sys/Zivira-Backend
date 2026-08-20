@@ -26,6 +26,21 @@ const payrollRunSchema = new Schema(
     loanId: { type: Schema.Types.ObjectId, ref: "Loan", default: null },
     arrears: { type: Number, default: 0 },
     estimatedTax: { type: Number, default: 0 },
+    // Phase 2 "Advanced Statutory Calculations" (Zivira_HR_Client_Requirement_1A.docx
+    // §32) — computed at generation time from whichever StatutoryRule was
+    // ACTIVE that month (see statutory-rule.model.ts). Baked in here rather
+    // than recomputed live so a past payslip never silently changes if HR
+    // edits the rules later.
+    pfEmployee: { type: Number, default: 0 },
+    pfEmployer: { type: Number, default: 0 },
+    professionalTax: { type: Number, default: 0 },
+    esiEmployee: { type: Number, default: 0 },
+    esiEmployer: { type: Number, default: 0 },
+    // Phase 2 "OT" item — extra hours beyond the ACTIVE StatutoryRule's
+    // standardShiftHours/day, summed from Attendance checkInAt/checkOutAt
+    // across the month, paid at otRatePerHour (or a derived hourly rate).
+    otHours: { type: Number, default: 0 },
+    otAmount: { type: Number, default: 0 },
     netPay: { type: Number, required: true },
     roundingRule: { type: String, default: "NEAREST_RUPEE" },
     status: { type: String, enum: ["DRAFT", "HR_APPROVED", "LOCKED"], default: "DRAFT", index: true },

@@ -6,6 +6,7 @@ import { EmployeeModel } from "../models/employee.model.js";
 import { runExactTenSeed } from "../seed/exact-10.js";
 import { runDataCorrections } from "../seed/fix-data-corrections.js";
 import { getMasterModel } from "../models/master-record.model.js";
+import { LeaveTypeModel } from "../models/leave-type.model.js";
 
 export const seedRouter = Router();
 
@@ -176,4 +177,32 @@ seedRouter.post("/hr-user", asyncHandler(async (req, res) => {
   );
 
   res.json({ success: true, message: `${username} created. Login: ${username} / Ziviramumbai` });
+}));
+
+// Standard Leave Types (Zivira_HR_Client_Requirement_1A.docx §25 Leave
+// Management). The Leave module went live with no rows in the leaveTypes
+// collection at all, so the ESS "Apply for Leave" dropdown had nothing to
+// select — this seeds the standard set HR expects to see out of the box.
+// Idempotent (upsert), safe to call more than once.
+//
+//   curl -X POST https://<backend>/api/seed/leave-types -H "x-seed-secret: <SEED_SECRET>"
+seedRouter.post("/leave-types", asyncHandler(async (req, res) => {
+  const secret = req.headers["x-seed-secret"];
+  if (!secret || secret !== process.env.SEED_SECRET) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+
+  const tenantSlug = "zivira-labs";
+  const types = ["Casual Leave", "Sick Leave", "Earned Leave", "Loss of Pay"];
+
+  for (const leaveTypeDesc of types) {
+    await LeaveTypeModel.updateOne(
+      { tenantSlug, leaveTypeDesc },
+      { tenantSlug, leaveTypeDesc, status: "ACTIVE" },
+      { upsert: true }
+    );
+  }
+
+  res.json({ success: true, message: `Seeded ${types.length} leave types for ${tenantSlug}.` });
 }));

@@ -10,6 +10,7 @@ import { LeaveApplicationModel } from "../models/leave-application.model.js";
 import { LeaveTypeModel } from "../models/leave-type.model.js";
 import { LoanModel } from "../models/loan.model.js";
 import { PayrollRunModel } from "../models/payroll-run.model.js";
+import { CompOffModel } from "../models/comp-off.model.js";
 import { audit } from "../utils/audit.js";
 import { serializeDocument } from "../utils/serialize.js";
 
@@ -177,11 +178,25 @@ essRouter.get(
   })
 );
 
+// ── Comp-Off (Phase 2 item, own balance only) ──────────────────────
+essRouter.get(
+  "/comp-offs",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug, employeeCode } = req.auth!;
+    const rows = await CompOffModel.find({ tenantSlug, employeeCode }).sort({ createdAt: -1 }).lean();
+    res.json({ data: rows.map(serializeDocument) });
+  })
+);
+
 const leaveApplySchema = z.object({
   leaveType: z.string().min(1),
   fromDate: z.coerce.date(),
   toDate: z.coerce.date(),
-  reason: z.string().optional()
+  reason: z.string().optional(),
+  // Phase 2 "Comp-Off" item: when set, this application spends the given
+  // AVAILABLE CompOff credit (see comp-off.model.ts) instead of drawing
+  // from a leave-type balance.
+  compOffId: z.string().optional()
 });
 
 essRouter.post(
@@ -197,6 +212,12 @@ essRouter.post(
     // leave type is treated as paid.
     const isLWP = /loss of pay|lwp/i.test(body.leaveType);
 
+    let compOff = null;
+    if (body.compOffId) {
+      compOff = await CompOffModel.findOne({ _id: body.compOffId, tenantSlug, employeeCode, status: "AVAILABLE" });
+      if (!compOff) throw new HttpError(400, "This Comp-Off credit is not available to spend");
+    }
+
     const row = await LeaveApplicationModel.create({
       tenantSlug,
       employeeCode,
@@ -205,9 +226,18 @@ essRouter.post(
       toDate: body.toDate,
       days,
       reason: body.reason ?? null,
-      isLWP,
+      isLWP: compOff ? false : isLWP, // spending a Comp-Off credit is always paid time off
+      isCompOff: !!compOff,
+      compOffId: compOff ? compOff._id : null,
       status: "PENDING"
     });
+
+    if (compOff) {
+      compOff.status = "USED";
+      compOff.usedInLeaveId = row._id;
+      await compOff.save();
+    }
+
     await audit("LEAVE_APPLIED", "LeaveApplication", String(row._id), { tenantSlug, employeeCode });
     res.status(201).json({ data: serializeDocument(row) });
   })
