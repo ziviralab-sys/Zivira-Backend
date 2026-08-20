@@ -38,6 +38,8 @@ import { enrichWithEmployeeNames } from "../utils/enrich-employee-names.js";
 import { computeComplianceRows } from "../utils/compliance.js";
 import { syncPayrollStatuses } from "../utils/payroll.js";
 import { PayrollStatusModel } from "../models/payroll-status.model.js";
+import { SalaryStructureModel } from "../models/salary-structure.model.js";
+import { PayrollRunModel } from "../models/payroll-run.model.js";
 import { computeRepAnalysisRows, computeManagerJointWorkRows } from "../utils/rep-manager-analysis.js";
 import { DoctorVisitExceptionModel } from "../models/doctor-visit-exception.model.js";
 import { computeProductExposureRows } from "../utils/product-analytics.js";
@@ -1652,4 +1654,209 @@ companyRouter.patch("/config/:key", asyncHandler(async (req, res) => {
   await audit("COMPANY_CONFIG_UPDATED", "CompanyConfig", String(row._id), { tenantSlug, key: req.params.key, value });
   res.json({ data: serializeDocument(row) });
 }));
+
+// ══════════════════════════════════════════════════════════════════════
+// HR/Payroll Client Requirement (1A/1B) — Phase 1: Salary Structure +
+// Payroll Run engine. Reuses the existing /employees, /attendance and
+// /holidays data. Saturday/OT policy and rounding beyond nearest-rupee
+// are not specified in the client documents, so Phase 1 intentionally
+// keeps those simple and documented rather than inventing rules.
+// ══════════════════════════════════════════════════════════════════════
+
+const salaryStructureSchema = z.object({
+  employeeCode: z.string().min(1),
+  ctc: z.number().positive(),
+  basicPercent: z.number().min(0).max(100).default(50),
+  hraPercent: z.number().min(0).max(100).default(20),
+  allowancePercent: z.number().min(0).max(100).default(30),
+  effectiveFrom: z.coerce.date(),
+  status: z.enum(["ACTIVE", "INACTIVE"]).default("ACTIVE")
+});
+
+companyRouter.get(
+  "/salary-structures",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const query: Record<string, unknown> = { tenantSlug };
+    if (typeof req.query.employeeCode === "string" && req.query.employeeCode.trim()) {
+      query.employeeCode = req.query.employeeCode.trim();
+    }
+    const rows = await SalaryStructureModel.find(query).sort({ employeeCode: 1, effectiveFrom: -1 });
+    res.json({ data: rows.map(serializeDocument) });
+  })
+);
+
+companyRouter.post(
+  "/salary-structures",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const body = salaryStructureSchema.parse(req.body);
+    const employee = await EmployeeModel.findOne({ tenantSlug, employeeCode: body.employeeCode }).lean();
+    if (!employee) throw new HttpError(404, `Employee ${body.employeeCode} not found`);
+    const row = await SalaryStructureModel.create({ ...body, tenantSlug });
+    await audit("SALARY_STRUCTURE_CREATED", "SalaryStructure", String(row._id), { tenantSlug, employeeCode: row.employeeCode });
+    res.status(201).json({ data: serializeDocument(row) });
+  })
+);
+
+// Working days for a "YYYY-MM" month = days in month minus Sundays minus
+// state holidays recorded for the employee's state in the Holiday master
+// (weekendHoliday / otherHolidayDate). Deliberately simple; documented as
+// a stated Phase 1 simplification since Saturday/OT rules are unspecified.
+async function computeWorkingDays(tenantSlug: string, month: string, state: string | null | undefined): Promise<number> {
+  const [year, mon] = month.split("-").map((v) => parseInt(v, 10));
+  const daysInMonth = new Date(Date.UTC(year, mon, 0)).getUTCDate();
+  let sundays = 0;
+  const holidayDates = new Set<number>();
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const date = new Date(Date.UTC(year, mon - 1, d));
+    if (date.getUTCDay() === 0) sundays++;
+  }
+
+  if (state) {
+    const holidays = await HolidayModel.find({ tenantSlug, stateName: state, status: "ACTIVE" }).lean();
+    for (const h of holidays) {
+      if (h.otherHolidayDate) {
+        const hd = new Date(h.otherHolidayDate);
+        if (hd.getUTCFullYear() === year && hd.getUTCMonth() + 1 === mon) {
+          holidayDates.add(hd.getUTCDate());
+        }
+      }
+    }
+  }
+
+  return Math.max(1, daysInMonth - sundays - holidayDates.size);
+}
+
+async function computeLwpDays(tenantSlug: string, employeeCode: string, month: string): Promise<number> {
+  const [year, mon] = month.split("-").map((v) => parseInt(v, 10));
+  const start = new Date(Date.UTC(year, mon - 1, 1));
+  const end = new Date(Date.UTC(year, mon, 1));
+  // Phase 1 simplification (unspecified in the docs): ABSENT is unpaid
+  // (LWP), LEAVE is treated as paid leave and does not reduce pay.
+  return AttendanceModel.countDocuments({
+    tenantSlug,
+    employeeCode,
+    attendanceDate: { $gte: start, $lt: end },
+    status: "ABSENT"
+  });
+}
+
+companyRouter.post(
+  "/payroll/runs",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const { month } = z.object({ month: z.string().regex(/^\d{4}-\d{2}$/) }).parse(req.body);
+
+    const employees = await EmployeeModel.find({ tenantSlug, status: "ACTIVE" }).lean();
+    const created: unknown[] = [];
+    const skipped: string[] = [];
+
+    for (const employee of employees) {
+      const existing = await PayrollRunModel.findOne({ tenantSlug, employeeCode: employee.employeeCode, month }).lean();
+      if (existing) { skipped.push(employee.employeeCode); continue; }
+
+      const structure = await SalaryStructureModel.findOne({ tenantSlug, employeeCode: employee.employeeCode, status: "ACTIVE" })
+        .sort({ effectiveFrom: -1 })
+        .lean();
+      if (!structure) { skipped.push(employee.employeeCode); continue; }
+
+      const basic = Math.round((structure.ctc * structure.basicPercent) / 100);
+      const hra = Math.round((structure.ctc * structure.hraPercent) / 100);
+      const allowance = Math.round((structure.ctc * structure.allowancePercent) / 100);
+      const grossEarnings = basic + hra + allowance;
+
+      const workingDays = await computeWorkingDays(tenantSlug, month, employee.state);
+      const lwpDays = await computeLwpDays(tenantSlug, employee.employeeCode, month);
+      const lwpDeduction = Math.round((grossEarnings / workingDays) * lwpDays);
+      const netPay = grossEarnings - lwpDeduction;
+
+      const row = await PayrollRunModel.create({
+        tenantSlug,
+        employeeCode: employee.employeeCode,
+        month,
+        basic,
+        hra,
+        allowance,
+        grossEarnings,
+        workingDays,
+        lwpDays,
+        lwpDeduction,
+        netPay,
+        status: "DRAFT"
+      });
+      created.push(serializeDocument(row));
+    }
+
+    await audit("PAYROLL_RUN_GENERATED", "PayrollRun", undefined, { tenantSlug, month, createdCount: created.length, skippedCount: skipped.length });
+    res.status(201).json({ data: created, skipped, month });
+  })
+);
+
+companyRouter.get(
+  "/payroll/runs",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const query: Record<string, unknown> = { tenantSlug };
+    if (typeof req.query.month === "string" && req.query.month.trim()) {
+      query.month = req.query.month.trim();
+    }
+    const rows = await PayrollRunModel.find(query).sort({ employeeCode: 1 }).lean();
+    const employees = await EmployeeModel.find({ tenantSlug }, { employeeCode: 1, name: 1, designation: 1 }).lean();
+    const nameByCode = new Map(employees.map((e) => [e.employeeCode, e.name]));
+    const data = rows.map((r) => ({ ...serializeDocument(r), employeeName: nameByCode.get(r.employeeCode) ?? null }));
+    res.json({ data });
+  })
+);
+
+companyRouter.patch(
+  "/payroll/runs/:id/approve",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const row = await PayrollRunModel.findOne({ _id: req.params.id, tenantSlug });
+    if (!row) throw new HttpError(404, "Payroll run record not found");
+    if (row.status === "LOCKED") throw new HttpError(400, "Locked payroll runs cannot be modified");
+
+    row.status = "HR_APPROVED";
+    row.approvedBy = req.auth!.sub ?? null;
+    row.approvedAt = new Date();
+    await row.save();
+    await audit("PAYROLL_RUN_APPROVED", "PayrollRun", String(row._id), { tenantSlug, employeeCode: row.employeeCode, month: row.month });
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+companyRouter.patch(
+  "/payroll/runs/:id/lock",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const row = await PayrollRunModel.findOne({ _id: req.params.id, tenantSlug });
+    if (!row) throw new HttpError(404, "Payroll run record not found");
+    if (row.status !== "HR_APPROVED") throw new HttpError(400, "Only HR-approved payroll runs can be locked");
+
+    row.status = "LOCKED";
+    await row.save();
+    await audit("PAYROLL_RUN_LOCKED", "PayrollRun", String(row._id), { tenantSlug, employeeCode: row.employeeCode, month: row.month });
+    res.json({ data: serializeDocument(row) });
+  })
+);
+
+companyRouter.get(
+  "/payroll/runs/:id/payslip",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const row = await PayrollRunModel.findOne({ _id: req.params.id, tenantSlug }).lean();
+    if (!row) throw new HttpError(404, "Payroll run record not found");
+    const employee = await EmployeeModel.findOne({ tenantSlug, employeeCode: row.employeeCode }).lean();
+    res.json({
+      data: {
+        ...serializeDocument(row),
+        employeeName: employee?.name ?? null,
+        designation: employee?.designation ?? null,
+        division: employee?.division ?? null
+      }
+    });
+  })
+);
 

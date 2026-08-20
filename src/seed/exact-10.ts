@@ -300,12 +300,19 @@ async function seedLegacyModels() {
     tenantSlug: TENANT, moleculeName: m, therapyName: THERAPIES[i], status: "ACTIVE"
   })), "ProductGroup");
 
-  await reset(DealerModel, { tenantSlug: TENANT }, STOCKISTS.map((s, i) => ({
+  const dealerRows = STOCKISTS.map((s, i) => ({
     tenantSlug: TENANT, sourceSNo: i + 1, employeeName: s.mrName, employeeCode: s.mrCode, patchName: s.hq,
     dealerName: s.name, contactPersonName: `Contact Person ${i + 1}`, dealerPhone: s.phone,
     dealerEmail: `${s.code.toLowerCase()}@dealer-demo.in`, country: "India", state: s.state, city: s.city,
     location: s.city, pincode: `${400000 + i * 1111}`, address: s.address, status: "ACTIVE"
-  })), "Dealer");
+  }));
+  await reset(DealerModel, { tenantSlug: TENANT }, dealerRows, "Dealer");
+  // Zivira_Master_Client_Change_Requirement_3A.docx — this is the real,
+  // live Chemist Master data (the "Add Chemist" screen writes here via
+  // /company/dealers). Cached under the registry key "dealers" so every
+  // "Chemist" field elsewhere (sourceMaster: "dealers") resolves against
+  // these same real records instead of a disconnected placeholder.
+  cache.set("dealers", dealerRows);
 
   await reset(HolidayModel, { tenantSlug: TENANT }, TERRITORIES.map((t, i) => ({
     tenantSlug: TENANT, sourceSNo: i + 1, stateName: t.state, weekendHoliday: "Sunday",
@@ -654,7 +661,7 @@ async function seedIdentityMasters() {
 
   const regionRows = TERRITORIES.map((t, i) => ({
     tenantSlug: TENANT, zoneName: t.zone, regionName: t.region, regionCode: `RG-${String(i + 1).padStart(2, "0")}`,
-    state: t.state, manager: pick(EMPLOYEES.filter((e) => e.role === "ABM" || e.role === "RBM"), i).name, status: "Active"
+    state: t.state, division: DIVISIONS_3[i % 3], manager: pick(EMPLOYEES.filter((e) => e.role === "ABM" || e.role === "RBM"), i).name, status: "Active"
   }));
   cache.set("regionZoneMaster", regionRows);
   await getMasterModel("regionZoneMaster").deleteMany({ tenantSlug: TENANT });
@@ -662,7 +669,7 @@ async function seedIdentityMasters() {
   console.log(`  [OK] Region/Zone Master: ${regionRows.length} records`);
 
   const territoryRows = TERRITORIES.map((t, i) => ({
-    tenantSlug: TENANT, hqCode: t.code, headquartersName: t.hq, state: t.state, city: t.city,
+    tenantSlug: TENANT, hqCode: t.code, headquartersName: t.hq, division: DIVISIONS_3[i % 3], state: t.state, city: t.city,
     metroNonMetro: i % 2 === 0 ? "Metro" : "Non-Metro", zone: t.zone, region: t.region, patchName: `${t.city} Patch`, status: "Active"
   }));
   cache.set("territoryHqMaster", territoryRows);
@@ -751,8 +758,12 @@ async function seedIdentityMasters() {
   console.log(`  [OK] Doctor — Mapping: ${doctorMappingRows.length} records`);
 
   const doctorDealerMappingRows = DOCTORS.map((d, i) => ({
+    // Zivira_Master_Client_Change_Requirement_3A.docx — "chemist" now
+    // matches an actual record in the "dealers" collection (see the
+    // DealerModel reset above, dealerName: STOCKISTS[i].name) instead of a
+    // freestanding "<city> Chemist" string nothing else pointed to.
     tenantSlug: TENANT, doctorCode: d.code, doctorName: d.name, stockist: STOCKISTS[i % STOCKISTS.length].name,
-    chemist: `${TERRITORIES[d.territoryIdx].city} Chemist`, distributor: STOCKISTS[i % STOCKISTS.length].name
+    chemist: STOCKISTS[i % STOCKISTS.length].name, distributor: STOCKISTS[i % STOCKISTS.length].name
   }));
   await getMasterModel("doctorDealerMapping").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("doctorDealerMapping").insertMany(doctorDealerMappingRows);

@@ -77,6 +77,12 @@ export const MASTERS: MasterConfig[] = [
       { key: "regionName", label: "Region Name" },
       { key: "regionCode", label: "Region Code" },
       { key: "state", label: "State", options: INDIAN_STATES },
+      // Zivira_Master_Client_Change_Requirement_3A.docx — "the same
+      // geographical name can exist under different divisions" (e.g. two
+      // divisions both running a Chennai-area zone). Without this, nothing
+      // recorded which division a zone belongs to, so it was effectively
+      // one shared zone list no matter how many divisions used it.
+      { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
       { key: "manager", label: "Manager", sourceMaster: "employees", sourceField: "name" },
       { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
@@ -88,6 +94,14 @@ export const MASTERS: MasterConfig[] = [
     fields: [
       { key: "hqCode", label: "HQ Code" },
       { key: "headquartersName", label: "Headquarters Name" },
+      // Zivira_Master_Client_Change_Requirement_3A.docx — "take the
+      // territory name, not the headquarters name... the headquarters can
+      // change depending on the division... Division + Territory ->
+      // Headquarters, rather than Territory -> Headquarters." Recording the
+      // division on the HQ record itself is what makes that hold — the same
+      // territory can now have a different HQ record per division instead
+      // of one HQ being silently treated as universal.
+      { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
       { key: "state", label: "State", options: INDIAN_STATES },
       { key: "city", label: "City" },
       { key: "metroNonMetro", label: "Metro / Non-Metro", options: ["Metro", "Non-Metro"] },
@@ -278,7 +292,11 @@ export const MASTERS: MasterConfig[] = [
       { key: "doctorCode", label: "Doctor Code", sourceMaster: "doctorMaster", sourceField: "doctorCode" },
       { key: "doctorName", label: "Doctor Name", computed: { fromField: "doctorCode", sourceMaster: "doctorMaster", lookupField: "doctorCode", displayField: "doctorName" } },
       { key: "stockist", label: "Stockist", sourceMaster: "stockistMaster", sourceField: "stockistName" },
-      { key: "chemist", label: "Chemist" },
+      // Zivira_Master_Client_Change_Requirement_3A.docx — Dealer Mapping must
+      // reference the real Chemist Master, not a free-text field (which is
+      // how a dealer mapping could end up pointing at nothing at all, or at
+      // whatever a stray typo happened to say).
+      { key: "chemist", label: "Chemist", sourceMaster: "dealers", sourceField: "dealerName" },
       { key: "distributor", label: "Distributor" }
     ]
   },
@@ -495,6 +513,39 @@ export const MASTERS: MasterConfig[] = [
       { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
+  // Zivira_Master_Client_Change_Requirement_3A.docx — "Dealer Mapping should
+  // use Chemist Master data, not Doctor/Stockist data." The Admin portal
+  // already has a real, live Chemist Master screen (components/chemist-
+  // master.tsx, "Add Chemist") — it just isn't backed by the generic masters
+  // registry, it's the dedicated /company/dealers collection. Every "Chemist"
+  // dropdown below used to point at stockistMaster (or, for Dealer Mapping,
+  // wasn't linked to any master at all) simply because "dealers" wasn't
+  // reachable through this registry's sourceMaster mechanism. This entry
+  // doesn't add a new tab or a new dataset — it exposes the SAME "dealers"
+  // collection the live Chemist Master screen already reads and writes,
+  // purely so other masters can reference real chemist records by name.
+  {
+    key: "dealers",
+    title: "Chemist / Dealer",
+    keyFields: ["dealerName"],
+    fields: [
+      { key: "sourceSNo", label: "S.No", type: "number" },
+      { key: "dealerName", label: "Chemist Name" },
+      { key: "employeeName", label: "Employee Name" },
+      { key: "employeeCode", label: "Employee Code" },
+      { key: "patchName", label: "Patch Name" },
+      { key: "contactPersonName", label: "Contact Person Name" },
+      { key: "dealerPhone", label: "Phone" },
+      { key: "dealerEmail", label: "Email" },
+      { key: "country", label: "Country" },
+      { key: "state", label: "State" },
+      { key: "city", label: "City" },
+      { key: "location", label: "Location" },
+      { key: "pincode", label: "Pincode" },
+      { key: "address", label: "Address" },
+      { key: "status", label: "Status", options: ["ACTIVE", "INACTIVE"] }
+    ]
+  },
   {
     key: "sfc",
     title: "SFC (Standard Field Coverage)",
@@ -640,7 +691,7 @@ export const MASTERS: MasterConfig[] = [
       { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
       { key: "patch", label: "Patch", sourceMaster: "patchNameMaster", sourceField: "patchName" },
       { key: "doctor", label: "Doctor", sourceMaster: "doctorMaster", sourceField: "doctorName" },
-      { key: "chemist", label: "Chemist", sourceMaster: "stockistMaster", sourceField: "stockistName" },
+      { key: "chemist", label: "Chemist", sourceMaster: "dealers", sourceField: "dealerName" },
       { key: "hospital", label: "Hospital" },
       { key: "productsPromoted", label: "Products Promoted", sourceMaster: "productMaster", sourceField: "productName" },
       { key: "samplesIssued", label: "Samples Issued" },
@@ -724,7 +775,7 @@ export const MASTERS: MasterConfig[] = [
       { key: "employee", label: "Employee", sourceMaster: "employees", sourceField: "name" },
       { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
       { key: "patch", label: "Patch", sourceMaster: "patchNameMaster", sourceField: "patchName" },
-      { key: "chemist", label: "Chemist", sourceMaster: "stockistMaster", sourceField: "stockistName" },
+      { key: "chemist", label: "Chemist", sourceMaster: "dealers", sourceField: "dealerName" },
       { key: "competitorCompany", label: "Competitor Company" },
       { key: "competitorBrand", label: "Competitor Brand" },
       { key: "competitorProduct", label: "Competitor Product" },
@@ -887,7 +938,7 @@ export const MASTERS: MasterConfig[] = [
     title: "Chemist Coverage Report",
     keyFields: ["chemist", "mr"],
     fields: [
-      { key: "chemist", label: "Chemist", sourceMaster: "stockistMaster", sourceField: "stockistName" },
+      { key: "chemist", label: "Chemist", sourceMaster: "dealers", sourceField: "dealerName" },
       { key: "type", label: "Type", options: ["Core", "Non Core"] },
       { key: "mr", label: "MR", sourceMaster: "employees", sourceField: "name" },
       { key: "plannedVisits", label: "Planned Visits", type: "number" },
