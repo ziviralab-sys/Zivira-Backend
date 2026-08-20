@@ -677,6 +677,17 @@ async function seedIdentityMasters() {
   await getMasterModel("territoryHqMaster").insertMany(territoryRows);
   console.log(`  [OK] Territory/HQ Master: ${territoryRows.length} records`);
 
+  // Not its own admin tab (see registry.ts comment) — exists purely so the
+  // Sales tab's Area field (Zivira_Master_Tab_Client_Change_3B.docx §9) is
+  // a real live dropdown instead of free text.
+  const areaRows = TERRITORIES.map((t, i) => ({
+    tenantSlug: TENANT, areaCode: `AR-${String(i + 1).padStart(2, "0")}`, areaName: `${t.city} Area`, hq: t.hq, status: "Active"
+  }));
+  cache.set("areaMaster", areaRows);
+  await getMasterModel("areaMaster").deleteMany({ tenantSlug: TENANT });
+  await getMasterModel("areaMaster").insertMany(areaRows);
+  console.log(`  [OK] Area Master: ${areaRows.length} records`);
+
   const therapyRows = THERAPIES.map((name, i) => ({
     tenantSlug: TENANT, therapyCode: `TH-${String(i + 1).padStart(2, "0")}`, therapyName: name, description: `${name} therapy area`, status: "Active"
   }));
@@ -897,25 +908,74 @@ async function seedSalesAndReportingMasters() {
     });
   }
 
-  const targetRows = salesRows((i) => ({ targetQty: 500 + i * 50, targetValue: (500 + i * 50) * (110 + i * 8) }));
+  // Zivira_Master_Tab_Client_Change_3B.docx field names — Target Unit x Unit
+  // Price = Target Value, and Sales - Return = Net Sale (mirrors the same
+  // calculation masters.routes.ts now applies server-side on every save).
+  const targetRows = salesRows((i) => {
+    const targetUnit = 500 + i * 50;
+    const unitPrice = 110 + i * 8;
+    return { targetUnit, unitPrice, targetValue: targetUnit * unitPrice };
+  });
   await getMasterModel("targetMaster").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("targetMaster").insertMany(targetRows);
   console.log(`  [OK] Target Master: ${targetRows.length} records`);
 
-  const primaryRows = salesRows((i) => ({ achievedQty: 420 + i * 45, achievedValue: (420 + i * 45) * (110 + i * 8) }));
+  const primaryRows = salesRows((i) => {
+    const unitPrice = 110 + i * 8;
+    const salesUnit = 500 + i * 40, freeUnit = 10 + i * 5, returnUnit = 5 + i * 2;
+    return {
+      stockist: STOCKISTS[i % STOCKISTS.length].name,
+      salesUnit, salesValue: salesUnit * unitPrice,
+      freeUnit, freeValue: freeUnit * unitPrice,
+      returnUnit, returnValue: returnUnit * unitPrice,
+      netSaleUnit: salesUnit - returnUnit, netSaleValue: (salesUnit - returnUnit) * unitPrice
+    };
+  });
   await getMasterModel("primarySales").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("primarySales").insertMany(primaryRows);
   console.log(`  [OK] Primary Sales: ${primaryRows.length} records`);
 
-  const secondaryRows = salesRows((i) => ({ stockistOffQty: 380 + i * 40, stockistOffValue: (380 + i * 40) * (110 + i * 8) }));
+  // Secondary Sales = Stockist -> Chemist. The "chemist" value matches the
+  // real dealers/Chemist Master record (dealerName === STOCKISTS[i].name,
+  // same identity the DealerModel reset above and Dealer — Dealer Mapping
+  // seeding use) so the dropdown and the seeded value agree.
+  const secondaryRows = salesRows((i) => {
+    const unitPrice = 110 + i * 8;
+    const salesUnit = 440 + i * 35, freeUnit = 8 + i * 4, returnUnit = 4 + i * 2;
+    return {
+      stockist: STOCKISTS[i % STOCKISTS.length].name,
+      chemist: STOCKISTS[i % STOCKISTS.length].name,
+      salesUnit, salesValue: salesUnit * unitPrice,
+      freeUnit, freeValue: freeUnit * unitPrice,
+      returnUnit, returnValue: returnUnit * unitPrice,
+      netSaleUnit: salesUnit - returnUnit, netSaleValue: (salesUnit - returnUnit) * unitPrice
+    };
+  });
   await getMasterModel("secondarySales").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("secondarySales").insertMany(secondaryRows);
   console.log(`  [OK] Secondary Sales: ${secondaryRows.length} records`);
 
-  const claimsRows = salesRows((i) => ({ claimAmount: 5000 + i * 750, approvalStatus: ["Approved", "Pending", "Rejected"][i % 3] }));
+  const claimsRows = TERRITORIES.map((t, i) => {
+    const p = PRODUCTS[i];
+    return {
+      tenantSlug: TENANT, division: p.division, zone: t.zone, region: t.region, area: `${t.city} Area`, hq: t.hq,
+      product: p.name, stockist: STOCKISTS[i % STOCKISTS.length].name, claimDate: daysAgo(20 + i * 5),
+      claimType: ["Scheme", "Damage", "Expiry", "Rate Difference", "Other"][i % 5],
+      claimQuantity: 20 + i * 4, claimValue: 5000 + i * 750,
+      claimStatus: ["Approved", "Pending", "Rejected"][i % 3], remarks: `Claim record ${i + 1}`, status: "Active"
+    };
+  });
   await getMasterModel("claimsMaster").deleteMany({ tenantSlug: TENANT });
   await getMasterModel("claimsMaster").insertMany(claimsRows);
   console.log(`  [OK] Claims Master: ${claimsRows.length} records`);
+
+  // IMS — the transcript confirms only that this is the fifth Sales button;
+  // its field list is explicitly left undefined, so it gets the same
+  // organizational/product/month hierarchy every other Sales button shares.
+  const imsRows = salesRows(() => ({}));
+  await getMasterModel("imsMaster").deleteMany({ tenantSlug: TENANT });
+  await getMasterModel("imsMaster").insertMany(imsRows);
+  console.log(`  [OK] IMS: ${imsRows.length} records`);
 }
 
 // The remaining ~30 masters (attendance/holiday/expense-setup/daily-MR-work

@@ -5,6 +5,7 @@ import { asyncHandler } from "../http/async-handler.js";
 import { requireAuth, requireCompanyAdmin } from "../http/auth.js";
 import { mastersRouter } from "./masters.routes.js";
 import { MASTERS } from "../masters/registry.js";
+import { getMasterModel } from "../models/master-record.model.js";
 import { HttpError } from "../http/errors.js";
 import { AttendanceModel } from "../models/attendance.model.js";
 import { DcrModel } from "../models/dcr.model.js";
@@ -1855,6 +1856,67 @@ companyRouter.get(
         employeeName: employee?.name ?? null,
         designation: employee?.designation ?? null,
         division: employee?.division ?? null
+      }
+    });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════════════
+// Zivira_Master_Tab_Client_Change_3B.docx §2:37 — Monthly / Quarterly /
+// Half-Yearly / Total Target, and Achievement % (Net Sales ÷ Target × 100).
+// The doc explicitly says a quarter is just its three constituent months
+// summed ("April + May + June should constitute one quarter") and that
+// "you don't necessarily need separate tables" for each period — so this
+// is a single aggregation endpoint over the existing monthly rows rather
+// than new Quarterly/Half-Yearly schema/tables. Caller passes whichever
+// set of months it wants summed (1 month = Monthly, 3 = Quarterly, 6 =
+// Half-Yearly, all = Total).
+// ══════════════════════════════════════════════════════════════════════
+companyRouter.get(
+  "/analytics/sales-achievement",
+  asyncHandler(async (req, res) => {
+    const tenantSlug = req.auth!.tenantSlug!;
+    const months = typeof req.query.months === "string"
+      ? req.query.months.split(",").map((m) => m.trim()).filter(Boolean)
+      : [];
+    if (months.length === 0) {
+      throw new HttpError(400, "months query param is required (comma-separated, e.g. ?months=April 2026,May 2026,June 2026)");
+    }
+
+    const filter: Record<string, unknown> = { tenantSlug, month: { $in: months } };
+    for (const key of ["division", "zone", "region", "hq", "product"]) {
+      const value = req.query[key];
+      if (typeof value === "string" && value.trim()) filter[key] = value.trim();
+    }
+
+    const TargetModel = getMasterModel("targetMaster");
+    const PrimaryModel = getMasterModel("primarySales");
+    const SecondaryModel = getMasterModel("secondarySales");
+
+    const [targetRows, primaryRows, secondaryRows] = await Promise.all([
+      TargetModel.find(filter).lean(),
+      PrimaryModel.find(filter).lean(),
+      SecondaryModel.find(filter).lean()
+    ]);
+
+    const num = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+    const targetUnit = targetRows.reduce((sum, r) => sum + num(r.targetUnit), 0);
+    const targetValue = targetRows.reduce((sum, r) => sum + num(r.targetValue), 0);
+    const netSaleUnit = primaryRows.reduce((sum, r) => sum + num(r.netSaleUnit), 0)
+      + secondaryRows.reduce((sum, r) => sum + num(r.netSaleUnit), 0);
+    const netSaleValue = primaryRows.reduce((sum, r) => sum + num(r.netSaleValue), 0)
+      + secondaryRows.reduce((sum, r) => sum + num(r.netSaleValue), 0);
+    const achievementPercent = targetValue > 0 ? Math.round((netSaleValue / targetValue) * 10000) / 100 : null;
+
+    res.json({
+      data: {
+        months,
+        targetUnit,
+        targetValue,
+        netSaleUnit,
+        netSaleValue,
+        achievementPercent,
+        aboveOrBelowTarget: achievementPercent === null ? null : Math.round((netSaleValue - targetValue) * 100) / 100
       }
     });
   })

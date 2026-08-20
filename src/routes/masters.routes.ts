@@ -39,6 +39,29 @@ function validateOptionFields(config: ReturnType<typeof requireConfig>, body: Re
   }
 }
 
+// Zivira_Master_Tab_Client_Change_3B.docx — "the key calculations should be
+// centralized in the backend/service layer rather than duplicated in the
+// frontend": Target Value = Target Unit x Unit Price, and Net Sale
+// Unit/Value = Sales - Return for both Primary and Secondary Sales. Mutates
+// `doc` in place (the record about to be saved) so the client never has to
+// compute or submit these — it can send them, but whatever it sends is
+// overwritten with the real calculation.
+function applyComputedSalesFields(key: string, doc: Record<string, unknown>) {
+  const num = (v: unknown) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  if (key === "targetMaster") {
+    doc.targetValue = num(doc.targetUnit) * num(doc.unitPrice);
+  }
+
+  if (key === "primarySales" || key === "secondarySales") {
+    doc.netSaleUnit = num(doc.salesUnit) - num(doc.returnUnit);
+    doc.netSaleValue = num(doc.salesValue) - num(doc.returnValue);
+  }
+}
+
 // GET /masters — list every master's key/title/fields, so the frontend can render
 // exact document headers without hardcoding them anywhere.
 mastersRouter.get(
@@ -57,13 +80,24 @@ mastersRouter.get(
   })
 );
 
-// GET /masters/:key — list all records for this tenant
+// GET /masters/:key — list all records for this tenant. Supports filtering
+// by any declared field via query params (e.g. ?division=Astra&hq=Chennai),
+// so the Sales tab's cascading Division -> Zone -> Region -> Area -> HQ ->
+// Product -> Month dropdowns (Zivira_Master_Tab_Client_Change_3B.docx) can
+// narrow results without the frontend having to fetch and filter everything
+// client-side.
 mastersRouter.get(
   "/:key",
   asyncHandler(async (req, res) => {
     const config = requireConfig(req.params.key);
     const Model = getMasterModel(config.key);
-    const records = await Model.find({ tenantSlug: req.auth!.tenantSlug }).sort({ createdAt: 1 });
+    const filter: Record<string, unknown> = { tenantSlug: req.auth!.tenantSlug };
+    const fieldKeys = new Set(config.fields.map((f) => f.key));
+    for (const [key, value] of Object.entries(req.query)) {
+      if (!fieldKeys.has(key) || typeof value !== "string" || !value.trim()) continue;
+      filter[key] = value;
+    }
+    const records = await Model.find(filter).sort({ createdAt: 1 });
     res.json({ data: records.map(serializeDocument), schema: config });
   })
 );
@@ -105,6 +139,7 @@ mastersRouter.post(
     for (const f of config.fields) {
       if (req.body[f.key] !== undefined) doc[f.key] = req.body[f.key];
     }
+    applyComputedSalesFields(config.key, doc);
 
     const created = await Model.create(doc);
     await audit(`MASTER_${config.key.toUpperCase()}_CREATED`, config.key, String(created._id), { tenantSlug });
@@ -134,6 +169,20 @@ mastersRouter.put(
         const label = config.fields.find((f) => f.key === uf)?.label ?? uf;
         throw new HttpError(409, `A record with this ${label} already exists`);
       }
+    }
+
+    // A PUT here can be a partial update (e.g. only Return Unit changed) —
+    // computing Target Value / Net Sale Unit / Net Sale Value from `update`
+    // alone would silently drop whichever side of the calculation wasn't
+    // resubmitted. Merge onto the existing record first so the computed
+    // fields always reflect the real, complete row.
+    if (config.key === "targetMaster" || config.key === "primarySales" || config.key === "secondarySales") {
+      const existing = await Model.findOne({ _id: req.params.id, tenantSlug }).lean();
+      if (!existing) throw new HttpError(404, `${config.title} record not found`);
+      const merged: Record<string, unknown> = { ...existing, ...update };
+      applyComputedSalesFields(config.key, merged);
+      const computedKeys = config.key === "targetMaster" ? ["targetValue"] : ["netSaleUnit", "netSaleValue"];
+      for (const k of computedKeys) update[k] = merged[k];
     }
 
     const updated = await Model.findOneAndUpdate({ _id: req.params.id, tenantSlug }, { $set: update }, { new: true });

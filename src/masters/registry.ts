@@ -111,6 +111,24 @@ export const MASTERS: MasterConfig[] = [
       { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
+  // Zivira_Master_Tab_Client_Change_3B.docx §9 — "Area Master" is diagrammed
+  // as its own master (sibling of Division/Zone/Region/HQ Master) that
+  // "provides data to" the Area dropdown field used across Target / Primary
+  // Sales / Secondary Sales / Claims / IMS. Not exposed as its own admin
+  // tab (Task 3's "don't add tabs" constraint applies to Master Setup),
+  // but registered so the Area field on those 5 Sales masters can be a
+  // real live dropdown instead of free text.
+  {
+    key: "areaMaster",
+    title: "Area Master",
+    keyFields: ["areaCode"],
+    fields: [
+      { key: "areaCode", label: "Area Code" },
+      { key: "areaName", label: "Area Name" },
+      { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
+    ]
+  },
   {
     key: "therapyMaster",
     title: "Therapy Master",
@@ -968,6 +986,13 @@ export const MASTERS: MasterConfig[] = [
   // every save 404'd with "Unknown master" and the tables always showed 0
   // records. Now real registry entries, cross-linked to Division/Region/
   // Territory/Product the same way every other master is.
+  // Zivira_Master_Tab_Client_Change_3B.docx — the Sales tab's five buttons
+  // (Target Master, Primary Sales, Secondary Sales, Claims Master, IMS) and
+  // their exact field lists. Target Value / Net Sale Unit / Net Sale Value
+  // are computed server-side (masters.routes.ts) from Target Unit×Unit
+  // Price and Sales−Return respectively, per "the key calculations should
+  // be centralized in the backend/service layer rather than duplicated in
+  // the frontend" — the client still sees plain fields, just read-only ones.
   {
     key: "targetMaster",
     title: "Target Master",
@@ -976,11 +1001,13 @@ export const MASTERS: MasterConfig[] = [
       { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
       { key: "zone", label: "Zone", sourceMaster: "regionZoneMaster", sourceField: "zoneName" },
       { key: "region", label: "Region", sourceMaster: "regionZoneMaster", sourceField: "regionName" },
-      { key: "area", label: "Area" },
+      { key: "area", label: "Area", sourceMaster: "areaMaster", sourceField: "areaName" },
       { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
       { key: "product", label: "Product", sourceMaster: "productMaster", sourceField: "productName" },
       { key: "month", label: "Month" },
-      { key: "targetQty", label: "Target Qty", type: "number" },
+      { key: "targetUnit", label: "Target Unit", type: "number" },
+      { key: "unitPrice", label: "Unit Price", type: "number" },
+      // Target Value = Target Unit × Unit Price (server-computed on save).
       { key: "targetValue", label: "Target Value", type: "number" },
       { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
@@ -988,51 +1015,97 @@ export const MASTERS: MasterConfig[] = [
   {
     key: "primarySales",
     title: "Primary Sales",
-    keyFields: ["division", "hq", "product", "month"],
+    // Primary Sales = Company -> Stockist (Zivira_Master_Tab_Client_Change_3B.docx).
+    keyFields: ["division", "hq", "product", "month", "stockist"],
     fields: [
       { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
       { key: "zone", label: "Zone", sourceMaster: "regionZoneMaster", sourceField: "zoneName" },
       { key: "region", label: "Region", sourceMaster: "regionZoneMaster", sourceField: "regionName" },
-      { key: "area", label: "Area" },
+      { key: "area", label: "Area", sourceMaster: "areaMaster", sourceField: "areaName" },
       { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
       { key: "product", label: "Product", sourceMaster: "productMaster", sourceField: "productName" },
       { key: "month", label: "Month" },
-      { key: "achievedQty", label: "Achieved Qty", type: "number" },
-      { key: "achievedValue", label: "Achieved Value", type: "number" },
+      { key: "stockist", label: "Stockist", sourceMaster: "stockistMaster", sourceField: "stockistName" },
+      { key: "salesUnit", label: "Sales Unit", type: "number" },
+      { key: "salesValue", label: "Sales Value", type: "number" },
+      { key: "freeUnit", label: "Free Unit", type: "number" },
+      { key: "freeValue", label: "Free Value", type: "number" },
+      { key: "returnUnit", label: "Return Unit", type: "number" },
+      { key: "returnValue", label: "Return Value", type: "number" },
+      // Net Sale Unit/Value = Sales − Return (server-computed on save).
+      { key: "netSaleUnit", label: "Net Sale Unit", type: "number" },
+      { key: "netSaleValue", label: "Net Sale Value", type: "number" },
       { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
     key: "secondarySales",
     title: "Secondary Sales",
-    keyFields: ["division", "hq", "product", "month"],
+    // Secondary Sales = Stockist -> Chemist (Zivira_Master_Tab_Client_Change_3B.docx)
+    // — this is the same "Chemist" real-data link fixed for Dealer Mapping
+    // in Zivira_Master_Client_Change_Requirement_3A.docx (sourceMaster:
+    // "dealers" — the live Chemist Master's actual collection).
+    keyFields: ["division", "hq", "product", "month", "stockist", "chemist"],
     fields: [
       { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
       { key: "zone", label: "Zone", sourceMaster: "regionZoneMaster", sourceField: "zoneName" },
       { key: "region", label: "Region", sourceMaster: "regionZoneMaster", sourceField: "regionName" },
-      { key: "area", label: "Area" },
+      { key: "area", label: "Area", sourceMaster: "areaMaster", sourceField: "areaName" },
       { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
       { key: "product", label: "Product", sourceMaster: "productMaster", sourceField: "productName" },
       { key: "month", label: "Month" },
-      { key: "stockistOffQty", label: "Stockist Off-take Qty", type: "number" },
-      { key: "stockistOffValue", label: "Stockist Off-take Value", type: "number" },
+      { key: "stockist", label: "Stockist", sourceMaster: "stockistMaster", sourceField: "stockistName" },
+      { key: "chemist", label: "Chemist", sourceMaster: "dealers", sourceField: "dealerName" },
+      { key: "salesUnit", label: "Sales Unit", type: "number" },
+      { key: "salesValue", label: "Sales Value", type: "number" },
+      { key: "freeUnit", label: "Free Unit", type: "number" },
+      { key: "freeValue", label: "Free Value", type: "number" },
+      { key: "returnUnit", label: "Return Unit", type: "number" },
+      { key: "returnValue", label: "Return Value", type: "number" },
+      // Net Sale Unit/Value = Sales − Return (server-computed on save).
+      { key: "netSaleUnit", label: "Net Sale Unit", type: "number" },
+      { key: "netSaleValue", label: "Net Sale Value", type: "number" },
       { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   },
   {
     key: "claimsMaster",
     title: "Claims Master",
+    keyFields: ["division", "hq", "product", "stockist", "claimDate"],
+    fields: [
+      { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
+      { key: "zone", label: "Zone", sourceMaster: "regionZoneMaster", sourceField: "zoneName" },
+      { key: "region", label: "Region", sourceMaster: "regionZoneMaster", sourceField: "regionName" },
+      { key: "area", label: "Area", sourceMaster: "areaMaster", sourceField: "areaName" },
+      { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
+      { key: "product", label: "Product", sourceMaster: "productMaster", sourceField: "productName" },
+      { key: "stockist", label: "Stockist", sourceMaster: "stockistMaster", sourceField: "stockistName" },
+      { key: "claimDate", label: "Claim Date", type: "date" },
+      { key: "claimType", label: "Claim Type", options: ["Scheme", "Damage", "Expiry", "Rate Difference", "Other"] },
+      { key: "claimQuantity", label: "Claim Quantity", type: "number" },
+      { key: "claimValue", label: "Claim Value", type: "number" },
+      { key: "claimStatus", label: "Claim Status", options: ["Approved", "Pending", "Rejected"] },
+      { key: "remarks", label: "Remarks" },
+      { key: "status", label: "Status", options: ACTIVE_INACTIVE }
+    ]
+  },
+  // IMS is confirmed in the transcript only as the fifth Sales button — its
+  // field list was explicitly left undefined ("the transcript only mentions
+  // IMS as a module; it does not define its complete field list"). This
+  // gives it the same organizational/product/month hierarchy every other
+  // Sales button shares, without inventing undocumented fields.
+  {
+    key: "imsMaster",
+    title: "IMS",
     keyFields: ["division", "hq", "product", "month"],
     fields: [
       { key: "division", label: "Division", sourceMaster: "divisionMaster", sourceField: "divisionName" },
       { key: "zone", label: "Zone", sourceMaster: "regionZoneMaster", sourceField: "zoneName" },
       { key: "region", label: "Region", sourceMaster: "regionZoneMaster", sourceField: "regionName" },
-      { key: "area", label: "Area" },
+      { key: "area", label: "Area", sourceMaster: "areaMaster", sourceField: "areaName" },
       { key: "hq", label: "HQ", sourceMaster: "territoryHqMaster", sourceField: "headquartersName" },
       { key: "product", label: "Product", sourceMaster: "productMaster", sourceField: "productName" },
       { key: "month", label: "Month" },
-      { key: "claimAmount", label: "Claim Amount", type: "number" },
-      { key: "approvalStatus", label: "Approval Status", options: ["Approved", "Pending", "Rejected"] },
       { key: "status", label: "Status", options: ACTIVE_INACTIVE }
     ]
   }
