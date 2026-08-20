@@ -144,3 +144,36 @@ seedRouter.post("/run", asyncHandler(async (req, res) => {
 
   res.json({ success: true, message: "abm-001 created. Login: abm-001 / ziviramumbai" });
 }));
+
+// Creates/updates a dedicated Company Admin login for the HR portal —
+// same portal/permissions as the main Admin app's "adminzivira" account
+// (there is no separate HR role in the backend), just a distinct,
+// memorable username for the HR team instead of reusing the Admin one.
+//
+//   curl -X POST https://<backend>/api/seed/hr-user -H "x-seed-secret: <SEED_SECRET>"
+seedRouter.post("/hr-user", asyncHandler(async (req, res) => {
+  const secret = req.headers["x-seed-secret"];
+  if (!secret || secret !== process.env.SEED_SECRET) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+
+  const username = "zivirahr@gmail.com";
+  const passwordHash = await bcrypt.hash("Ziviramumbai", 12);
+
+  await UserModel.updateOne(
+    { username },
+    {
+      username,
+      passwordHash,
+      displayName: "Zivira HR Admin",
+      role: "COMPANY_ADMIN",
+      portal: "COMPANY_ADMIN",
+      tenantSlug: "zivira-labs",
+      active: true
+    },
+    { upsert: true }
+  );
+
+  res.json({ success: true, message: `${username} created. Login: ${username} / Ziviramumbai` });
+}));
