@@ -11,6 +11,13 @@ const documentSchema = new Schema(
   {
     name: { type: String, required: true }, // Aadhaar / PAN / Photo / Degree Certificate / Experience Letter / Bank Proof
     fileName: { type: String, default: null },
+    // The actual file content, stored as a data: URL (base64), capped at 3MB
+    // client- and server-side — small enough to live safely inside a Mongo
+    // document while still letting HR open/preview what was actually
+    // uploaded instead of only seeing a filename with nothing behind it.
+    fileData: { type: String, default: null },
+    fileType: { type: String, default: null },
+    fileSize: { type: Number, default: null },
     status: { type: String, enum: ["PENDING", "UPLOADED", "VERIFIED", "REJECTED"], default: "PENDING" },
     rejectReason: { type: String, default: null }
   },

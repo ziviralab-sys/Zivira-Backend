@@ -94,20 +94,42 @@ essRouter.put(
   })
 );
 
-// Employee marks a document as uploaded (metadata only — no file storage
-// backend is configured in this environment; fileName is whatever the
-// browser reports, kept as a record for HR to cross-check, documented
-// Phase 1 limitation).
+// Employee uploads a document — the actual bytes come in as a base64
+// data: URL (fileData), capped at 3MB so review docs must be reasonably
+// sized. HR's document-verification screen can then open/preview exactly
+// what was submitted instead of only seeing a filename.
+const MAX_DOCUMENT_BYTES = 3 * 1024 * 1024; // 3MB
+
+const documentUploadSchema = z.object({
+  fileName: z.string().min(1),
+  fileData: z.string().min(1).startsWith("data:", "fileData must be a data: URL"),
+  fileType: z.string().optional(),
+  fileSize: z.number().int().positive().optional()
+});
+
 essRouter.post(
   "/onboarding/documents/:docName",
   asyncHandler(async (req, res) => {
     const { tenantSlug, employeeCode } = req.auth!;
-    const { fileName } = z.object({ fileName: z.string().min(1) }).parse(req.body);
+    const body = documentUploadSchema.parse(req.body);
+
+    // Re-derive the byte size from the base64 payload itself rather than
+    // trusting the client-reported fileSize — the 3MB limit has to hold
+    // even if the browser lied or the field was omitted.
+    const base64Part = body.fileData.split(",")[1] ?? "";
+    const approxBytes = Math.floor((base64Part.length * 3) / 4);
+    if (approxBytes > MAX_DOCUMENT_BYTES) {
+      throw new HttpError(400, "File is larger than the 3MB limit. Please upload a smaller file.");
+    }
+
     const row = await OnboardingModel.findOne({ tenantSlug, employeeCode });
     if (!row) throw new HttpError(404, "Onboarding has not been initiated by HR yet");
     const doc = row.documents.find((d: any) => d.name === req.params.docName);
     if (!doc) throw new HttpError(404, "Document not found");
-    doc.fileName = fileName;
+    doc.fileName = body.fileName;
+    doc.fileData = body.fileData;
+    doc.fileType = body.fileType ?? null;
+    doc.fileSize = approxBytes;
     doc.status = "UPLOADED";
     doc.rejectReason = null;
     await row.save();

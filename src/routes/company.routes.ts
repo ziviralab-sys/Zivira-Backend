@@ -15,6 +15,7 @@ import { ProductModel } from "../models/product.model.js";
 import { audit } from "../utils/audit.js";
 import { AuditLogModel } from "../models/audit-log.model.js";
 import { serializeDocument } from "../utils/serialize.js";
+import { notifyEmployeeEmail } from "../utils/notify.js";
 import { StockistModel } from "../models/stockist.model.js";
 import { SubdivisionModel } from "../models/subdivision.model.js";
 import { FieldForceModel } from "../models/fieldforce.model.js";
@@ -2321,6 +2322,13 @@ companyRouter.patch(
     doc.rejectReason = null;
     await row.save();
     await audit("ONBOARDING_DOCUMENT_VERIFIED", "Onboarding", String(row._id), { tenantSlug, employeeCode: req.params.employeeCode, document: req.params.docName });
+    const employee = await EmployeeModel.findOne({ tenantSlug, employeeCode: req.params.employeeCode }).lean();
+    await notifyEmployeeEmail({
+      toEmail: employee?.email,
+      toName: employee?.name,
+      subject: `${req.params.docName} approved`,
+      message: `Your ${req.params.docName} document has been verified and approved by HR.`
+    });
     res.json({ data: serializeDocument(row) });
   })
 );
@@ -2338,6 +2346,13 @@ companyRouter.patch(
     doc.rejectReason = reason;
     await row.save();
     await audit("ONBOARDING_DOCUMENT_REJECTED", "Onboarding", String(row._id), { tenantSlug, employeeCode: req.params.employeeCode, document: req.params.docName, reason });
+    const employee = await EmployeeModel.findOne({ tenantSlug, employeeCode: req.params.employeeCode }).lean();
+    await notifyEmployeeEmail({
+      toEmail: employee?.email,
+      toName: employee?.name,
+      subject: `${req.params.docName} rejected`,
+      message: `Your ${req.params.docName} document was rejected by HR.\n\nReason: ${reason}\n\nPlease re-upload a corrected copy.`
+    });
     res.json({ data: serializeDocument(row) });
   })
 );
