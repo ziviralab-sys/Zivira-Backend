@@ -153,7 +153,12 @@ essRouter.post(
     if (!row.personal || !row.address || !row.bank) {
       throw new HttpError(400, "Personal Info, Address, and Bank Details sections are required before submitting");
     }
-    const missingDocs = row.documents.filter((d: any) => d.status === "PENDING").map((d: any) => d.name);
+    // A REJECTED document must be re-uploaded (not just left as-is) before
+    // the employee can submit — otherwise a rejected file would silently
+    // sail through since it's technically no longer "PENDING".
+    const missingDocs = row.documents
+      .filter((d: any) => d.status === "PENDING" || d.status === "REJECTED")
+      .map((d: any) => d.name);
     if (missingDocs.length > 0) {
       throw new HttpError(400, `Please upload the following documents before submitting: ${missingDocs.join(", ")}`);
     }
@@ -178,6 +183,44 @@ essRouter.get(
     }
     const rows = await AttendanceModel.find(query).sort({ attendanceDate: -1 }).limit(400).lean();
     res.json({ data: rows.map(serializeDocument) });
+  })
+);
+
+// Self-service punch in / punch out — Zivira_HR_Client_Requirement_1A.docx
+// §9 Attendance Module says attendance must be capturable by the employee
+// and flow straight into the same AttendanceModel rows HR's Attendance
+// Register reads, rather than being a separate, disconnected record. One
+// row per calendar day (the model's existing unique tenantSlug +
+// employeeCode + attendanceDate index enforces that), upserted here.
+const punchSchema = z.object({ action: z.enum(["IN", "OUT"]) });
+
+essRouter.post(
+  "/attendance/punch",
+  asyncHandler(async (req, res) => {
+    const { tenantSlug, employeeCode } = req.auth!;
+    const { action } = punchSchema.parse(req.body);
+    const now = new Date();
+    const attendanceDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+
+    let row = await AttendanceModel.findOne({ tenantSlug, employeeCode, attendanceDate });
+
+    if (action === "IN") {
+      if (row?.checkInAt) throw new HttpError(400, "You have already punched in today");
+      if (!row) {
+        row = new AttendanceModel({ tenantSlug, employeeCode, attendanceDate, status: "PRESENT", checkInAt: now });
+      } else {
+        row.checkInAt = now;
+        row.status = "PRESENT";
+      }
+    } else {
+      if (!row?.checkInAt) throw new HttpError(400, "Please punch in before punching out");
+      if (row.checkOutAt) throw new HttpError(400, "You have already punched out today");
+      row.checkOutAt = now;
+    }
+
+    await row.save();
+    await audit("ATTENDANCE_PUNCH", "Attendance", String(row._id), { tenantSlug, employeeCode, action });
+    res.json({ data: serializeDocument(row) });
   })
 );
 

@@ -593,6 +593,11 @@ function genericValue(field: MasterField, i: number): unknown {
     if (key.includes("kms")) return 10 + i * 5;
     if (key.includes("rank")) return i + 1;
     if (key.includes("score")) return 70 + i * 3;
+    // A "number" field literally named/keyed "year" (Holiday Calendar's
+    // Year column, etc) needs an actual calendar year, not the generic
+    // 1-based row index — otherwise every seeded row shows "1", "2", "3"...
+    // instead of "2024", "2025", "2026".
+    if (key === "year" || key.endsWith("year")) return 2023 + (i % 4);
     return i + 1;
   }
 

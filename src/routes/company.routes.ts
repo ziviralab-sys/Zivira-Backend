@@ -85,7 +85,15 @@ const employeeSchema = z.object({
   territory: z.string().min(2),
   role: z.enum(["NBH", "BH", "RBM", "ZBM", "ABM", "SR_MR", "MR", "OTHER"]),
   drivingLicense: z.string().optional(),
-  status: z.enum(["ACTIVE", "INACTIVE"]).default("ACTIVE")
+  status: z.enum(["ACTIVE", "INACTIVE"]).default("ACTIVE"),
+  // These two were missing from the schema entirely — zod's .parse()
+  // silently strips any key not declared here, so the Add Employee form
+  // was sending email + joinDate on every create, and the backend was
+  // quietly throwing both away before they ever reached MongoDB. That's
+  // why Employment Details always showed "—" for Joining Date and
+  // Official Email regardless of what HR typed in.
+  email: z.string().email().optional().nullable(),
+  joinDate: z.string().optional().nullable()
 });
 
 const doctorSchema = z.object({
