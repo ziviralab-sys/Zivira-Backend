@@ -14,6 +14,13 @@
 //      "D" can only exist in already-stored documents from before that was
 //      enforced — so this cycles existing "D" rows across A/B/C evenly
 //      rather than dumping them all into one bucket.
+//   3. Any field keyed/ending in "year" (Holiday Calendar's Year column,
+//      etc.) whose stored value is a small placeholder number (1, 2, 3...)
+//      instead of a real calendar year. genericValue() in exact-10.ts was
+//      fixed to generate real years for these fields, but documents seeded
+//      before that fix still have the old 1/2/3... placeholders sitting in
+//      the live database — this corrects those in place without touching
+//      anything else on the record.
 //
 // Safe to re-run any time: it only touches documents that still match the
 // bad value, so a second run is a no-op.
@@ -97,12 +104,47 @@ async function fixDoctorCategoryD() {
   console.log(totalFixed ? `  Total corrected: ${totalFixed}` : "  No Category 'D' values found — nothing to fix.");
 }
 
+async function fixYearFields() {
+  console.log("\n── Fixing placeholder Year values (1, 2, 3...) -> real calendar years ──");
+  let totalFixed = 0;
+
+  // Same field-matching rule genericValue() in exact-10.ts uses to decide a
+  // field needs a real calendar year rather than a row index — covers
+  // Holiday Calendar's "year" today, and any future master reusing the same
+  // key pattern, automatically.
+  for (const config of MASTERS) {
+    for (const field of config.fields) {
+      if (field.type !== "number") continue;
+      const key = field.key.toLowerCase();
+      if (key !== "year" && !key.endsWith("year")) continue;
+
+      const Model = getMasterModel(config.key);
+      // A genuine calendar year is always >= 1900; anything smaller stored
+      // in this field can only be a leftover 1/2/3... placeholder from
+      // before exact-10.ts generated real years here.
+      const matches = await Model.find({ tenantSlug: TENANT, [field.key]: { $lt: 1900 } }).sort({ createdAt: 1 });
+      if (!matches.length) continue;
+
+      for (let i = 0; i < matches.length; i++) {
+        const doc = matches[i];
+        (doc as any)[field.key] = 2023 + (i % 4);
+        await doc.save();
+      }
+      totalFixed += matches.length;
+      console.log(`  [FIXED] ${config.key}.${field.key}: ${matches.length} record(s) placeholder -> real calendar year`);
+    }
+  }
+
+  console.log(totalFixed ? `  Total corrected: ${totalFixed}` : "  No placeholder Year values found — nothing to fix.");
+}
+
 export async function runDataCorrections() {
   await connectMongo();
   console.log(`Connected. Running targeted data corrections for tenant "${TENANT}" (no records deleted, no other fields touched)...`);
 
   await fixAraSpelling();
   await fixDoctorCategoryD();
+  await fixYearFields();
 
   console.log("\nDone.");
 }

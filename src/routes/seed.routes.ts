@@ -59,11 +59,12 @@ seedRouter.get("/inspect/:key", asyncHandler(async (req, res) => {
   });
 }));
 
-// Targeted, non-destructive data cleanup: "ARA" -> "Aura" spelling and
-// Doctor Category "D" -> A/B/C, across the live tenant data. Does NOT
-// delete or reset any records (unlike /exact-10 below) — use this instead
-// of a full reseed when the goal is just to correct those two known-bad
-// values without touching anything else the user has since added.
+// Targeted, non-destructive data cleanup: "ARA" -> "Aura" spelling,
+// Doctor Category "D" -> A/B/C, and placeholder Year values (1, 2, 3...)
+// -> real calendar years, across the live tenant data. Does NOT delete or
+// reset any records (unlike /exact-10 below) — use this instead of a full
+// reseed when the goal is just to correct those known-bad values without
+// touching anything else the user has since added.
 //
 //   curl -X POST https://<backend>/api/seed/fix-data -H "x-seed-secret: <SEED_SECRET>"
 seedRouter.post("/fix-data", asyncHandler(async (req, res) => {
